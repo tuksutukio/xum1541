@@ -1,6 +1,6 @@
 # Diskmasher
 
-A macOS GUI for mastering Commodore floppy disks via an xum1541 USB adapter. The goal is to reduce the mechanical effort of getting software from a digital collection onto physical media — minimum clicks between "I want this on a disk" and "disk is ready."
+A macOS GUI for mastering Commodore floppy disks via an xum1541 USB adapter. **How to use it: [USER-GUIDE.md](USER-GUIDE.md).** The goal is to reduce the mechanical effort of getting software from a digital collection onto physical media — minimum clicks between "I want this on a disk" and "disk is ready."
 
 ## What it is (and isn't)
 
@@ -63,9 +63,14 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 
 ## Planned and to-do
 
+### Disk files (right pane)
+- **Rename** in the File menu, with the DOS command `R0:new=old`: e.g. to make room for a local file of the same name before writing it
+- **Copy** in the File menu, with the DOS command `C0:copy=original`: an exact duplicate on the same disk, a spare in case the original gets damaged
+- Both check the new name (16 characters, not already on the disk) and refresh afterwards
+
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)
-- Scratch files from a local image via `c1541`
+- Delete (scratch) files from a local image via `c1541`, completing image editing with Read to image. Works on 40-track images too: `c1541` leaves tracks 36–40 and the extended BAM untouched (tested 2026-11-25); refuse files whose chain reaches beyond track 35, which neither `c1541` nor a stock DOS can handle
 - Rename files in a local image via `c1541`
 - Show blocks-free count in the image directory popup
 
@@ -83,13 +88,12 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 
 ### Testing and documentation
 - Hardware tests, run on request against a real drive and a sacrificial disk (read, write, scratch, erase, format, cancel paths); the offline suite is in `tests/`
-- User documentation: every feature, how to use it, what each check and warning means (this README is a feature list, not a guide)
 
 ### Release
 - GitHub release with full dependency and setup documentation
 
 ## Known caveats
 
-- 40-track `.d64` images are recognised and can be written to a drive, but cannot be created locally — extended tracks require proper sector headers that only hardware formatting provides. The option has been intentionally removed from the image creation dialog.
+- 40-track `.d64` images are recognised, can be read from a disk and written back, but new images are 35-track only: a blank 40-track image is easy to make, but `c1541` (and a stock 1541/1571 DOS) only ever writes files on tracks 1–35, so the extra tracks would stay empty.
 - The VICE `c1541` binary has a heavy GTK3/audio dependency tree and must be run via the VICE app bundle wrapper script. A standalone headless build would be preferable long-term.
 - Hard IEC bus lockups (xum1541 firmware stuck mid-transaction) currently require USB replug. The cancel sequence (SIGTERM → SIGKILL → `cbmctrl reset`) handles the common case; the IOKit reset path is a future improvement.
