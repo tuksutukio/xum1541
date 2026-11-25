@@ -75,6 +75,9 @@ to disk (`FB_PATHS` maps platform → files).
   29). Checks the directory against the pane listing, saves a JSON backup (`DIR_BACKUP_DIR`;
   `restore_directory_backup()` writes it back), writes only changed sectors, reads them back. The writes run inside
   the task dialog's `enter_critical()`, which turns Cancel off without a race: never leave half a directory.
+  Tested 2026-11-25 on drive 9 (1571): a file from the middle and one from the second directory sector moved to
+  the top, the rest kept their order; after `cbmctrl reset`, `cbmread <unit> '*'` (what `LOAD"*"` asks for)
+  delivered the moved file; a SEQ was refused before any drive access.
 - **74,DRIVE NOT READY can be the head, not the disk:** after a reset or disk change the DOS checks the drive by reading
   one header on whatever track the head is on (1541 ROM `LC63D` → `LD00E`); on a blank or unreadable track it sets a
   not-ready flag and answers 74 until `I`, even once the head is back on a good track (found 2026-11-25 after a
