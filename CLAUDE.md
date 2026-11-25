@@ -47,7 +47,9 @@ to disk (`FB_PATHS` maps platform → files).
 - **Sort and FB-ify share `_rewrite_disk`:** check, full read + analysis, read every file, and only then scratch
   and rewrite. Anything risky stops it before the disk is touched; a failure after the scratch moves the read
   files to a `*_rescue` folder next to the image and keeps the image.
-- One drive only: `DRIVE = "8"` is a module constant used throughout.
+- **The selected drive is the module global `DRIVE`**, read at call time everywhere (never bind it as a default
+  argument). Only `DiskMasher._select_drive` changes it (Drive menu, after Detect; saved in prefs), and it refuses
+  while an operation window is open.
 
 ## UI layout
 
@@ -92,6 +94,10 @@ to disk (`FB_PATHS` maps platform → files).
   stalled at track 31; stopping it (SIGTERM after 120 s) left the drive unresponsive: the xum1541 answered at once,
   `detect` found no drive. A drive power cycle alone (no USB replug) fixed it, so the drive was the stuck part.
   Prevented since by `reset_and_settle()` before every `d64copy`.
+- **Not the xum1541, 2026-11-25 ~02:50:** drive 8 (1571) stopped reading any disk: motor spins, activity LED flashes,
+  then `74,DRIVE NOT READY` (per `drive-1571-users-guide-1985` p.110: no formatted disk in place). The bus and the
+  drive's command channel were fine (`detect`, `status` OK), and the same disks read in a spare 1571 at device 9.
+  Suspected overheating (disks covering the vents). Don't read this as an adapter lockup.
 
 - **Next if it recurs:** try the SIGKILL-from-terminal case first. Real fix: a programmatic USB device reset via
   macOS IOKit, or check whether `xum1541cfg` has a reset command. Not yet investigated.

@@ -30,7 +30,7 @@ def _save_prefs(cfg):
     with open(PREFS_FILE, "w") as f:
         cfg.write(f)
 
-DRIVE = "8"
+DRIVE = "8"   # the drive all operations use; changed only by DiskMasher._select_drive
 COLLECTION_ROOT = "/Volumes/ULTI" if os.path.exists("/Volumes/ULTI") else os.path.expanduser("~")
 RELEVANT_EXTENSIONS = {".d64", ".d71", ".d81", ".prg", ".t64", ".tap", ".crt"}
 TYPE_EXT = {"PRG": ".prg", "SEQ": ".seq", "USR": ".usr", "REL": ".rel"}
@@ -304,9 +304,10 @@ def probe_disk(proc_store=None, cancel_event=None, track18=True):
 
     Reads track 18 (BAM: name, double-sided flag, extended BAM) and track 36 (is the disk
     formatted beyond 35 tracks, and does that area hold data?). Returns a dict with error,
-    double_sided, ext_bam, disk_name, t36_readable (some sector read OK), t36_data.
-    Not yet seen on hardware: a disk whose track 36 was never formatted; a 30 s watchdog
-    covers the case where d64copy hangs on it."""
+    double_sided, ext_bam, disk_name, t36_readable (some sector read OK), t36_data,
+    t36_checked (False if the track-36 read timed out). On a never-formatted track 36
+    d64copy gives up quickly (whole check about 7 s on a 1571, 2026-11-25); the 30 s
+    watchdog is only a safety net."""
     res = {"error": None, "double_sided": False, "ext_bam": None, "disk_name": "",
            "t36_readable": False, "t36_data": False, "t36_checked": False}
     reset_and_settle()
@@ -423,6 +424,11 @@ def _run_bounded(cmd, timeout, proc_store=None):
             proc_store[0] = None
 
 
+def parse_detect(text):
+    """[(unit, model)] from `cbmctrl detect` output, e.g. ' 8: 1571' → [("8", "1571")]."""
+    return re.findall(r'^\s*(\d+):\s*(\S+)', text or "", re.M)
+
+
 def cbm_detect():
     try:
         r = subprocess.run(["cbmctrl", "detect"], capture_output=True, text=True, timeout=5)
@@ -431,12 +437,12 @@ def cbm_detect():
         return f"Error: {e}"
 
 
-def drive_status(drive=DRIVE, timeout=120):
+def drive_status(drive=None, timeout=120):
     """Read the drive's error channel; returns (code, text), code None if unreadable.
     `cbmctrl command` returns as soon as the command is sent and the drive works on
     afterwards (V0 returned in 0.1 s, the status read then waited 2.7 s), so reading the
     status is how to wait until a command has finished, before the next bus request."""
-    r = _run_bounded(["cbmctrl", "status", drive], timeout)
+    r = _run_bounded(["cbmctrl", "status", drive or DRIVE], timeout)
     if r is None or r[0] != 0:
         return None, (r[1].strip() if r else "status read timed out")
     text = r[1].strip()
@@ -444,9 +450,10 @@ def drive_status(drive=DRIVE, timeout=120):
     return (int(m.group(1)) if m else None), text
 
 
-def cbm_dir(drive=DRIVE):
+def cbm_dir(drive=None):
     try:
-        r = subprocess.run(["cbmctrl", "dir", drive], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["cbmctrl", "dir", drive or DRIVE],
+                           capture_output=True, text=True, timeout=30)
         return r.stdout.strip()
     except Exception as e:
         return f"Error: {e}"
@@ -936,6 +943,10 @@ class CbmDirPane(ttk.Frame):
         drive_menu.add_command(label="Detect",  command=lambda: self.event_generate("<<DetectRequest>>"))
         drive_menu.add_command(label="Refresh", command=lambda: self.event_generate("<<RefreshRequest>>"))
         drive_btn["menu"] = drive_menu
+        self._drive_menu = drive_menu
+        self.drive_var   = tk.StringVar(value=DRIVE)
+        self._drive_btn  = drive_btn
+        self.set_drives([])
         drive_btn.pack(side="right", padx=4, pady=2)
 
         disk_btn  = ttk.Menubutton(nav, text="Disk")
@@ -971,6 +982,21 @@ class CbmDirPane(ttk.Frame):
         self._sel_status = tk.StringVar(value="")
         ttk.Label(self, textvariable=self._status,    anchor="w", padding=(6, 2)).pack(fill="x")
         ttk.Label(self, textvariable=self._sel_status, anchor="w", padding=(6, 2)).pack(fill="x")
+
+    def set_drives(self, drives):
+        """Rebuild the drive choices under Detect/Refresh from [(unit, model)]."""
+        m = self._drive_menu
+        if m.index("end") is not None and m.index("end") > 1:
+            m.delete(2, "end")
+        m.add_separator()
+        if not drives:
+            m.add_command(label="(no drives detected)", state="disabled")
+        for unit, model in drives:
+            m.add_radiobutton(label=f"Use drive {unit}: {model}", value=unit,
+                              variable=self.drive_var,
+                              command=lambda: self.event_generate("<<DriveSelected>>"))
+        self.drive_var.set(DRIVE)
+        self._drive_btn.configure(text=f"Drive {DRIVE}")
 
     def _apply_dir(self, raw):
         """Apply a raw cbm_dir result to the UI. Must be called on the main thread."""
@@ -1046,7 +1072,14 @@ class DiskMasher(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _restore_prefs(self):
+        global DRIVE
         cfg = _load_prefs()
+        unit = cfg.get("drive", "unit", fallback="").strip()
+        if unit.isdigit() and 4 <= int(unit) <= 30:
+            DRIVE = unit
+            self.cbm_pane.drive_var.set(DRIVE)
+            self.cbm_pane._drive_btn.configure(text=f"Drive {DRIVE}")
+            self.cbm_pane._hdr.set(f"{DRIVE}:  (not refreshed)")
         if "window" in cfg:
             geo = cfg["window"].get("geometry")
             if geo:
@@ -1087,6 +1120,8 @@ class DiskMasher(tk.Tk):
         self.fs_pane.bind("<<WriteRequest>>",        lambda e: self._write_to_cbm())
         self.fs_pane.bind("<<SelectionChanged>>",    lambda e: self._update_read_to_image_state())
         self.cbm_pane.bind("<<DetectRequest>>",  lambda e: self._detect_drives())
+        self.cbm_pane.bind("<<DriveSelected>>",
+                           lambda e: self._select_drive(self.cbm_pane.drive_var.get()))
         self.cbm_pane.bind("<<RefreshRequest>>", lambda e: self._refresh_cbm())
         self.cbm_pane.bind("<<ReadRequest>>",   lambda e: self._read_from_cbm())
         self.cbm_pane.bind("<<FormatRequest>>", lambda e: self._format_disk())
@@ -1266,16 +1301,51 @@ class DiskMasher(tk.Tk):
             result = cbm_detect()
             def _done():
                 close()
+                drives = parse_detect(result) if not result.startswith("Error:") else []
+                self.cbm_pane.set_drives(drives)
                 if not result:
                     self._set_status("No drives detected.")
                 elif result.startswith("Error:"):
                     self._set_status(result)
                 else:
-                    self._set_status(f"Detected: {result}")
+                    found = ", ".join(f"{u}: {m}" for u, m in drives)
+                    units = [u for u, _ in drives]
+                    if units and DRIVE not in units and self._select_drive(units[0], refresh=False):
+                        self._set_status(f"Detected {found}. Drive {units[0]} selected "
+                                         f"(no drive answers at the previous one).")
+                    else:
+                        self._set_status(f"Detected {found}. Using drive {DRIVE}.")
                 if on_done:
                     on_done()
             self.after(0, _done)
         threading.Thread(target=_run, daemon=True).start()
+
+    def _select_drive(self, unit, refresh=True):
+        """Make `unit` the drive every operation uses. Refused while an operation window is
+        open, so a running Sort or copy can't switch drives halfway. Returns True if switched."""
+        global DRIVE
+        unit = str(unit)
+        if unit == DRIVE:
+            return True
+        busy = [w for w in self.winfo_children()
+                if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+        if busy:
+            self.cbm_pane.drive_var.set(DRIVE)
+            messagebox.showinfo("Drive in use",
+                "Close the open operation window first, then switch drives.")
+            return False
+        DRIVE = unit
+        self.cbm_pane.drive_var.set(DRIVE)
+        self.cbm_pane._drive_btn.configure(text=f"Drive {DRIVE}")
+        self.cbm_pane.disk_name = ""
+        self.cbm_pane._hdr.set(f"{DRIVE}:  (not refreshed)")
+        cfg = _load_prefs()
+        cfg["drive"] = {"unit": DRIVE}
+        _save_prefs(cfg)
+        if refresh:
+            self._set_status(f"Using drive {DRIVE}.")
+            self.cbm_pane.refresh()
+        return True
 
     def _refresh_cbm(self):
         self._set_status("Refreshing…")

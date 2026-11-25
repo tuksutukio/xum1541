@@ -57,6 +57,9 @@ Key options:
   4 bytes each: free count + bitmap); the drive's DOS still reports **664 blocks free**, so a directory listing
   never reveals a 40-track disk.
 - Standard DOS refuses a file whose chain reaches track 36: `67,ILLEGAL TRACK OR SECTOR,36,00`.
+- On a disk never formatted past track 35, `d64copy -s 36 -e 36 -r 0` gives up quickly instead of hanging: diskmasher's
+  whole disk check (reset + tracks 18 and 36) took about 7 s, as on a 40-track disk, and reported a standard
+  35-track disk. Write image then refused a 40-track image without pre-format, as intended.
 - **`cbmread` exits 0 on a failed read** and only prints `[Warning] file copy ended with error status: …` and
   `[Warning] error reading NAME`, without creating the file. Treat any `[Warning]`/`[Fatal]` line as failure.
   `cbmwrite` prints `[Fatal] could not open file for writing: 63, FILE EXISTS` for a duplicate name.

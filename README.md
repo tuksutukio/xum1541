@@ -41,7 +41,7 @@ It is **not** a general-purpose file manager. The left pane is intentionally rea
 - Cancel button on all long-running operations — sends SIGTERM and gives the tool up to three seconds to let go of the bus (SIGKILL only if it doesn't), then `cbmctrl reset`, then a `cbmctrl detect` health check that reports one of: bus OK (with the drives found), no drive answering (check power and cable), or the xum1541 not responding (replug USB)
 - Status bar with operation feedback throughout
 - Single-instance enforcement via PID file
-- Auto-detect drives and refresh disk directory on startup
+- Auto-detect drives and refresh disk directory on startup; the Drive menu lists the detected drives to choose from (remembered across sessions; if the remembered drive doesn't answer, the first detected one is used)
 - "Read to image…" menu item is greyed out unless exactly one recognised image is selected in the left pane
 
 ## Testing status
