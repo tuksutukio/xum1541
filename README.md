@@ -23,6 +23,7 @@ It is **not** a general-purpose file manager. The left pane does only what a dis
 - **Write files** — write one or more local files (`.prg`, `.seq`, `.usr`) to the drive via `cbmwrite`; the file type comes from the extension (REL files can't be written); right pane refreshes after each file
 - **Read files** — read one or more files from the drive to the current local directory via `cbmread`; left pane refreshes after each file
 - **Scratch files** — delete one or more files from the drive via `cbmctrl`; right pane refreshes after each scratch
+- **Rename and copy files** — the drive's own `R0:` and `C0:` commands (copy: closed PRG/SEQ/USR, on the same disk); new names are checked first
 - **Write disk image** — write a `.d64`, `.d71`, or `.d81` image to the drive via `d64copy`/`imgcopy` with streaming progress
 - **Read disk to image** — read the entire disk from the drive into a local image file via `d64copy` with streaming progress and configurable retry count for bad sectors. A quick disk check (tracks 18 and 36) first picks 35 or 40 tracks and explains why, so a 40-track disk isn't silently cut short; double-sided disks are refused until `.d71` reading exists. Afterwards the log lists the image's files, read errors and any data on tracks 36–40. An interrupted read is kept as `…-incomplete.d64`, never under the real name
 - **FB-ify disk** — write a File Browser boot file to the disk; platform variants: C16/Plus4, C64, C128, VIC-20 (all five memory-configuration variants), All; same safety steps as Sort
@@ -62,11 +63,6 @@ The **Read IEC files to image** feature is newly implemented and has seen limite
 The current "Read to image…" implementation is deliberately minimal: it reads each selected CBM file to a temporary directory via `cbmread`, then writes it into the local image with `c1541 -write`. There is no integration between the image view and the transfer — the image directory popup is a one-shot modal, not a live view. This is enough to support the core workflow (pull files off an old floppy, drop them into an image, write the image back to a fresh disk) but is not a polished end-state.
 
 ## Planned and to-do
-
-### Disk files (right pane)
-- **Rename** in the File menu, with the DOS command `R0:new=old`: e.g. to make room for a local file of the same name before writing it
-- **Copy** in the File menu, with the DOS command `C0:copy=original`: an exact duplicate on the same disk, a spare in case the original gets damaged
-- Both check the new name (16 characters, not already on the disk) and refresh afterwards
 
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)

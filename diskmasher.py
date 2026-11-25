@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 PREFS_FILE = os.path.expanduser("~/.config/diskmasher/prefs.ini")
 
@@ -944,6 +944,34 @@ def cbm_display(text):
     return text.swapcase()
 
 
+def cbm_command_name(name):
+    """A name from `cbmctrl dir` as it must appear in a DOS command (`cbmctrl command`
+    sends its text raw, no PETSCII conversion), or None when that can't be done reliably.
+
+    Unshifted letters, which cbmctrl lists in lowercase, are PETSCII $41–$5A, the same
+    bytes as ASCII capitals, so they're sent uppercased. Shifted letters (listed in
+    uppercase) and graphics characters have no safe ASCII form, and wildcard or separator
+    characters would change what the command means."""
+    if any(c.isupper() or not (" " <= c.upper() <= "_") or c in ',":=*?' for c in name):
+        return None
+    return name.upper()
+
+
+def new_name_problem(new, existing):
+    """Why `new` can't be a file name on the disk, or None. `existing`: names as cbmctrl
+    lists them. Same character rules as the Format check, plus no DOS command characters."""
+    if not new:
+        return "Type a name."
+    if len(new) > 16:
+        return f"The name is {len(new)} characters; at most 16 fit."
+    bad = sorted({c for c in new if not (" " <= c.upper() <= "Z") or c in ',":=*?'})
+    if bad:
+        return "The name can't contain " + " ".join(repr(c) for c in bad) + "."
+    if new.upper() in {(cbm_command_name(n) or n.upper()) for n in existing}:
+        return f'"{new.upper()}" is already on the disk.'
+    return None
+
+
 def parse_cbm_dir(raw):
     lines = raw.splitlines()
     entries, disk_name, disk_id, blocks_free = [], "", "", None
@@ -1551,6 +1579,8 @@ class CbmDirPane(ttk.Frame):
         file_btn  = ttk.Menubutton(nav, text="File")
         file_menu = tk.Menu(file_btn, tearoff=False)
         file_menu.add_command(label="Scratch…", command=lambda: self.event_generate("<<ScratchRequest>>"))
+        file_menu.add_command(label="Rename…",  command=lambda: self.event_generate("<<RenameRequest>>"))
+        file_menu.add_command(label="Copy…",    command=lambda: self.event_generate("<<CopyRequest>>"))
         file_menu.add_command(label="Make first (LOAD\"*\")…",
                               command=lambda: self.event_generate("<<MakeFirstRequest>>"))
         file_btn["menu"] = file_menu
@@ -1738,6 +1768,8 @@ class DiskMasher(tk.Tk):
         self.cbm_pane.bind("<<ReadImageRequest>>",   self._when_free(self._read_image_from_cbm))
         self.cbm_pane.bind("<<ReadToImageRequest>>", self._when_free(self._read_to_image))
         self.cbm_pane.bind("<<ScratchRequest>>",     self._when_free(self._scratch_files))
+        self.cbm_pane.bind("<<RenameRequest>>",      self._when_free(lambda: self._rename_or_copy(False)))
+        self.cbm_pane.bind("<<CopyRequest>>",        self._when_free(lambda: self._rename_or_copy(True)))
         self.cbm_pane.bind("<<MakeFirstRequest>>",   self._when_free(self._make_first))
 
     def _update_read_to_image_state(self):
@@ -2151,12 +2183,84 @@ class DiskMasher(tk.Tk):
 
         self._start_op('Make first', run)
 
+    def _rename_or_copy(self, copy):
+        """File → Rename… / Copy…: the drive's own R and C commands (R0:NEW=OLD, C0:NEW=OLD).
+        Copy makes a second file on the same disk; the drive copies it by itself, with no
+        way to stop it halfway, so there's no Cancel."""
+        verb = "Copy" if copy else "Rename"
+        sel = self.cbm_pane.lb.curselection()
+        if len(sel) != 1:
+            messagebox.showinfo(verb, "Select one file in the right pane first.")
+            return
+        listing = self.cbm_pane._entries[:]
+        blocks, name, ftype = listing[sel[0]]
+        old = cbm_command_name(name)
+        if old is None:
+            messagebox.showerror(verb, f'"{cbm_display(name)}" contains graphics or special '
+                                 "characters that can't be typed into a drive command reliably.")
+            return
+        if copy:
+            if type_char(ftype) not in ("p", "s", "u") or ftype.startswith("*"):
+                messagebox.showerror(verb, f"Only closed PRG, SEQ and USR files can be copied "
+                                           f"(this one is {cbm_display(ftype)}).")
+                return
+            free = self.cbm_pane.blocks_free()
+            if free is not None and blocks > free:
+                messagebox.showerror(verb, f"Not enough room: the copy needs {blocks} blocks, "
+                                           f"{free} are free.")
+                return
+        new = cbm_display(name) if not copy else ""
+        while True:
+            new = simpledialog.askstring(
+                verb, f'{"New name for" if not copy else "Name for the copy of"} '
+                      f'"{cbm_display(name)}":', initialvalue=new, parent=self)
+            if new is None:
+                return
+            new = new.rstrip()
+            problem = new_name_problem(new, [n for _, n, _ in listing])
+            if not problem:
+                break
+            messagebox.showerror(verb, problem, parent=self)
+        new = new.upper()
+        cmd = f"{'C' if copy else 'R'}0:{new}={old}"
+        what = f'"{cbm_display(name)}" → "{new}"'
+        close = self._make_spinner(f"Copying {what}…" if copy else f"Renaming {what}…")
+        self._set_status(f"{'Copying' if copy else 'Renaming'} {what}…")
+
+        def run():
+            log_event(f"--- {verb} {what} on drive {DRIVE}")
+            r = _run_bounded(["cbmctrl", "command", DRIVE, cmd], 10)
+            # The drive answers once it's done; a copy of a long file takes a while.
+            code, st = drive_status(timeout=600 if copy else 60) if r and r[0] == 0 \
+                else (None, (r[1].strip() if r else "cbmctrl command didn't answer"))
+            # After a C (and maybe R) command, cbmwrite failed with 71,DIR ERROR,01,04 until
+            # a bus reset; I wasn't enough (2026-11-26, drive 9, 1571). The disk's BAM was fine.
+            reset_and_settle()
+
+            def done():
+                close()
+                if code == 0:
+                    self._set_status(f"{'Copied' if copy else 'Renamed'} {what}.")
+                else:
+                    self._set_status(f"{verb} failed: {st}")
+                    messagebox.showerror(verb, f"{verb} failed: {st}")
+                self.cbm_pane.refresh()
+            self.after(0, done)
+
+        self._start_op("Copying" if copy else "Renaming", run)
+
     def _scratch_files(self):
         entries = self.cbm_pane.selected_entries()
         if not entries:
             messagebox.showinfo("Scratch", "Select one or more files in the right pane first.")
             return
         names = [name for _, name, _ in entries]
+        odd = [cbm_display(n) for n in names if cbm_command_name(n) is None]
+        if odd:
+            messagebox.showerror("Scratch",
+                "These names contain graphics or special characters that can't be typed into "
+                "a drive command reliably, so Diskmasher won't scratch them:\n\n" + "\n".join(odd))
+            return
         confirm = messagebox.askyesno(
             "Scratch files",
             f"Scratch {len(names)} file{'s' if len(names) > 1 else ''} from drive {DRIVE}?\n\n"
@@ -2177,7 +2281,7 @@ class DiskMasher(tk.Tk):
                     break
                 set_msg(f"[{i}/{total}]  {cbm_display(name)}")
                 proc = subprocess.Popen(
-                    ["cbmctrl", "command", DRIVE, f"S:{name.upper()}"],
+                    ["cbmctrl", "command", DRIVE, f"S:{cbm_command_name(name)}"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 proc_store[0] = proc
                 proc.communicate(timeout=30)

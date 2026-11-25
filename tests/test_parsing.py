@@ -135,3 +135,22 @@ class Display(unittest.TestCase):
         self.assertEqual(d.cbm_display("prg<"), "PRG<")
         self.assertEqual(d.cbm_display("- lykia - c64"), "- LYKIA - C64")
         self.assertEqual(d.cbm_display("Ab"), "aB")                # shifted A: graphics, lowercase for now
+
+
+class CommandNames(unittest.TestCase):
+    def test_plain_names_go_uppercase(self):
+        self.assertEqual(d.cbm_command_name("matrix"), "MATRIX")
+        self.assertEqual(d.cbm_command_name("the last-1 @ [x]"), "THE LAST-1 @ [X]")
+
+    def test_names_a_command_cant_carry(self):
+        for name in ("Matrix",            # shifted M: a graphics character on a C64
+                     "a,b", "a:b", "a=b", "a*", "a?", 'a"b',
+                     "u@`iu", "x{y}"):     # cbmctrl's stand-ins for graphics
+            self.assertIsNone(d.cbm_command_name(name), name)
+
+    def test_new_names(self):
+        have = ["matrix", "notes"]
+        self.assertIsNone(d.new_name_problem("Game 2", have))
+        for new, want in (("", "Type"), ("x" * 17, "16"), ("a:b", "':'"), ("a=b", "'='"),
+                          ("ä", "'ä'"), ("MATRIX", "already"), ("Notes", "already")):
+            self.assertIn(want, d.new_name_problem(new, have) or "", new)

@@ -61,6 +61,12 @@ Key options:
 - `cbmctrl command` sends its text raw (no PETSCII conversion): file names in a DOS command must be uppercase
   ASCII (`S0:SEQTEST`). Lowercase names match nothing, and the drive still answers `01, FILES SCRATCHED,00`.
 
+**After the drive's own Copy or Rename (`cbmctrl command <unit> C0:NEW=OLD` / `R0:NEW=OLD`, 2026-11-26, drive 9, 1571):**
+the commands themselves worked (types kept), but the next `cbmwrite`s failed with `71,DIR ERROR,01,04`, even after
+`I`. The BAM on the disk was consistent (counts matched bitmaps). A `cbmctrl reset` fixed it at once. One failed
+write left a 1-block entry whose sector wasn't counted in the BAM (free count unchanged); a `V` (validate) cleans
+that up. Not yet known which of the two commands causes it; Diskmasher resets after both.
+
 **Disk facts seen with these tools (2026-11-25, 1571 in 1541 mode):**
 - The disk ID is in two places: the BAM (18/0 `$A2–$A3`, what a directory listing shows) and every sector header,
   written only by a format. `d64copy` writes the BAM, not the headers. To see the header ID, send `I` and read the

@@ -9,7 +9,7 @@ messages mean. For installation requirements, see [README.md](README.md).
 - [Before you start](#before-you-start)
 - [The window](#the-window)
 - [Choosing a drive](#choosing-a-drive)
-- [Files: write, read, scratch, make first](#files-write-read-scratch-make-first)
+- [Files: write, read, scratch, rename, copy, make first](#files-write-read-scratch-rename-copy-make-first)
 - [Whole disks: images, format, erase](#whole-disks-images-format-erase)
 - [Rearranging a disk: Sort and FB-ify](#rearranging-a-disk-sort-and-fb-ify)
 - [Local files and disk images](#local-files-and-disk-images)
@@ -68,7 +68,7 @@ selection. The divider between the panes can be dragged; window size and divider
 - **Drive → Refresh** reads the directory again. Commodore drives can't tell the computer that a disk was
   changed, so the right pane keeps showing the old disk until you refresh. Refresh after every disk change.
 
-## Files: write, read, scratch, make first
+## Files: write, read, scratch, rename, copy, make first
 
 ### Write files to the disk
 
@@ -95,6 +95,20 @@ really arrived: the opencbm tools sometimes report success after a failed transf
 
 Select files in the right pane and choose **File → Scratch…**. You confirm the list first; Diskmasher waits for
 the drive to finish each one before the next.
+
+### Rename and copy files
+
+Select one file in the right pane and choose **File → Rename…** or **File → Copy…**, then type the new name. The
+drive does the work itself (its `R` and `C` commands), so nothing travels to the Mac.
+
+- **Rename**, for example, to make room for a local file of the same name before writing it.
+- **Copy** makes a second, identical file on the same disk: a spare in case the original gets damaged. Only
+  closed PRG, SEQ and USR files can be copied, and there must be room for it. The drive copies on its own, so
+  there's no Cancel; a long file takes a while.
+- The new name: up to 16 characters, not already on the disk, and none of `, " : = * ?`. Letters are stored as
+  capitals, as typed on a C64.
+- Names with graphics characters (shown in lowercase in the listing) can't be renamed, copied or scratched:
+  they can't be typed into a drive command reliably.
 
 ### Make a file load with `LOAD"*"`
 

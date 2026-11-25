@@ -1,5 +1,6 @@
 """One drive operation at a time: DiskMasher's operation counter (_start_op/_end_op), the
 busy indicator, the menu guard and the deferred refresh, on a real Tk root without drives."""
+import gc
 import threading
 import time
 import tkinter as tk
@@ -44,7 +45,19 @@ class BusyApp(unittest.TestCase):
         app.cbm_pane.refresh = refresh
 
     def tearDown(self):
+        # Let the test's worker threads finish first: a thread that drops the last
+        # reference to a Tk object after the root is gone makes Tcl abort the whole
+        # process at exit ("Tcl_AsyncDelete: async handler deleted by the wrong thread").
+        for t in threading.enumerate():
+            if t is not threading.main_thread():
+                t.join(5)
         self.root.destroy()
+        # The bound methods set on the root make a reference cycle, so only the cyclic GC
+        # frees it, and that can run in any thread (a later test's worker): Tcl then aborts.
+        # Break the cycle and collect here, in the thread that created the root.
+        self.root.__dict__.clear()
+        self.app = self.root = None
+        gc.collect()
 
     def pump(self, until, timeout=5):
         """Run the Tk main loop until `until()` holds. A worker's after() call only reaches
