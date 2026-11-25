@@ -53,6 +53,11 @@ Key options:
   time (2026-11-25, 1571). `cbmctrl dir` and a scratch don't cause it. diskmasher does this in `reset_and_settle()`.
 
 **Disk facts seen with these tools (2026-11-25, 1571 in 1541 mode):**
+- The disk ID is in two places: the BAM (18/0 `$A2–$A3`, what a directory listing shows) and every sector header,
+  written only by a format. `d64copy` writes the BAM, not the headers. To see the header ID, send `I` and read the
+  drive's zero page: `cbmctrl download <unit> 0x12 2` (ID learnt from the headers; `$16–$17` is the last header
+  read; anatomy-of-the-1541 p.111). Write image's pre-format uses the image's own ID, so both match: checked
+  2026-11-25 on drive 9, an image with ID `7Q` gave `7Q` in both, where the old dialog would have formatted `01`.
 - `cbmforng -x` formats 40 tracks and writes a SpeedDOS-style extended BAM at `$C0–$D3` of 18/0 (tracks 36–40,
   4 bytes each: free count + bitmap); the drive's DOS still reports **664 blocks free**, so a directory listing
   never reveals a 40-track disk.
