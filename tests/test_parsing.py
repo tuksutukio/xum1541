@@ -127,3 +127,11 @@ class FormatHeaderInput(unittest.TestCase):
                                 ("OK", "1", "exactly two"), ("OK", "012", "exactly two"),
                                 ("OK", "0,", "ID"), ("ÄÖ", "01", "name"), ("OK", "{}", "ID")):
             self.assertIn(want, d.format_header_problem(name, did) or "", (name, did))
+
+
+class Display(unittest.TestCase):
+    def test_names_as_a_commodore_shows_them(self):
+        self.assertEqual(d.cbm_display("matrix"), "MATRIX")       # unshifted letters
+        self.assertEqual(d.cbm_display("prg<"), "PRG<")
+        self.assertEqual(d.cbm_display("- lykia - c64"), "- LYKIA - C64")
+        self.assertEqual(d.cbm_display("Ab"), "aB")                # shifted A: graphics, lowercase for now

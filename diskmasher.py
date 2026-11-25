@@ -931,6 +931,19 @@ def cbm_dir(drive=None):
     return out
 
 
+def cbm_display(text):
+    """A name, ID or type from `cbmctrl dir` as a Commodore shows it at power-up.
+
+    cbmctrl converts PETSCII to ASCII as the lowercase character set shows it: unshifted
+    letters ($41–$5A, what you type) come out lowercase and shifted ones ($C1–$DA)
+    uppercase. On the C64's default (uppercase/graphics) set the unshifted letters are
+    capitals, so swapping the case gives the familiar listing ("MATRIX"  PRG). Shifted
+    letters, graphics characters there, show as lowercase for now. Display only: the
+    names passed to cbmread/cbmwrite stay as cbmctrl gave them, since those tools
+    convert again."""
+    return text.swapcase()
+
+
 def parse_cbm_dir(raw):
     lines = raw.splitlines()
     entries, disk_name, disk_id, blocks_free = [], "", "", None
@@ -1573,7 +1586,7 @@ class CbmDirPane(ttk.Frame):
             return
         disk_name, disk_id, entries, blocks_free = parse_cbm_dir(raw)
         self.disk_name = disk_name     # last disk name read; the header text can say "refreshing…"
-        self._hdr.set(f'{DRIVE}:  "{disk_name}"  {disk_id}')
+        self._hdr.set(f'{DRIVE}:  "{cbm_display(disk_name)}"  {cbm_display(disk_id)}')
         if blocks_free is not None:
             kb_free = blocks_free * 254 // 1024
             self._status.set(f"{len(entries)} files  ·  {blocks_free} blocks ({kb_free} kB) free")
@@ -1582,7 +1595,8 @@ class CbmDirPane(ttk.Frame):
         self._entries = entries
         self.lb.delete(0, tk.END)
         for blk, name, ftype in entries:
-            self.lb.insert(tk.END, f"  {blk:>4}  {name:<24}  {ftype}")
+            quoted = f'"{cbm_display(name)}"'
+            self.lb.insert(tk.END, f"  {blk:>4}  {quoted:<18}  {cbm_display(ftype)}")
         self._sel_status.set("")
 
     def refresh(self):
@@ -2073,22 +2087,22 @@ class DiskMasher(tk.Tk):
         listing = self.cbm_pane._entries[:]
         blocks, name, ftype = listing[index]
         if index == 0:
-            messagebox.showinfo("Make first", f'"{name}" is already the first file.')
+            messagebox.showinfo("Make first", f'"{cbm_display(name)}" is already the first file.')
             return
         if ftype.lower().rstrip("<") != "prg":       # "prg<" is locked: fine; "*prg" isn't
             messagebox.showinfo("Make first",
-                f'"{name}" is a {ftype.upper()} file. LOAD"*" loads programs: pick a PRG.')
+                f'"{cbm_display(name)}" is a {cbm_display(ftype)} file. LOAD"*" loads programs: pick a PRG.')
             return
         if not messagebox.askyesno("Make first",
-                f'Move "{name}" to the first directory slot on drive {DRIVE}?\n\n'
+                f'Move "{cbm_display(name)}" to the first directory slot on drive {DRIVE}?\n\n'
                 'After a drive reset or power-on, LOAD"*",8 (or ,8,1) then loads it. The other '
                 "files keep their order. Only the directory is rewritten; the original is saved "
                 "to a backup first.", parent=self):
             return
 
         set_msg, close, cancel_event, proc_store = self._make_task_dialog(
-            "Make first", f'Moving "{name}" to the first slot…')
-        self._set_status(f'Moving "{name}" to the first directory slot…')
+            "Make first", f'Moving "{cbm_display(name)}" to the first slot…')
+        self._set_status(f'Moving "{cbm_display(name)}" to the first directory slot…')
 
         def run():
             ok, msg, backup = move_to_first_slot(
@@ -2120,7 +2134,7 @@ class DiskMasher(tk.Tk):
         confirm = messagebox.askyesno(
             "Scratch files",
             f"Scratch {len(names)} file{'s' if len(names) > 1 else ''} from drive {DRIVE}?\n\n"
-            + "\n".join(names))
+            + "\n".join(cbm_display(n) for n in names))
         if not confirm:
             return
 
@@ -2135,7 +2149,7 @@ class DiskMasher(tk.Tk):
             for i, name in enumerate(names, 1):
                 if cancel_event.is_set():
                     break
-                set_msg(f"[{i}/{total}]  {name}")
+                set_msg(f"[{i}/{total}]  {cbm_display(name)}")
                 proc = subprocess.Popen(
                     ["cbmctrl", "command", DRIVE, f"S:{name.upper()}"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -2146,7 +2160,7 @@ class DiskMasher(tk.Tk):
                     break
                 code, st = drive_status()      # waits until the drive has finished
                 if proc.returncode != 0 or code != 1:
-                    errors.append(f"{name}: {st}")
+                    errors.append(f"{cbm_display(name)}: {st}")
                 else:
                     ok += 1
                     raw = cbm_dir(DRIVE)
@@ -2185,12 +2199,12 @@ class DiskMasher(tk.Tk):
             for i, (blk, name, ftype) in enumerate(entries, 1):
                 if cancel_event.is_set():
                     break
-                set_msg(f"[{i}/{total}]  {name}")
+                set_msg(f"[{i}/{total}]  {cbm_display(name)}")
                 err = cbm_read_file(DRIVE, name, dest_dir, proc_store, ftype)
                 if cancel_event.is_set():
                     break
                 if err:
-                    errors.append(f"{name}: {err}")
+                    errors.append(f"{cbm_display(name)}: {err}")
                 else:
                     ok += 1
                     self.after(0, self.fs_pane._load)
@@ -2261,20 +2275,20 @@ class DiskMasher(tk.Tk):
                 for i, (blk, name, ftype) in enumerate(entries, 1):
                     if cancel_event.is_set():
                         break
-                    set_msg(f"[{i}/{total}]  {name}")
+                    set_msg(f"[{i}/{total}]  {cbm_display(name)}")
 
                     per_dir = tempfile.mkdtemp(dir=tmp)
                     err = cbm_read_file(DRIVE, name, per_dir, proc_store, ftype)
                     if cancel_event.is_set():
                         break
                     if err:
-                        errors.append(f"{name}: {err}")
+                        errors.append(f"{cbm_display(name)}: {err}")
                         continue
 
                     tmp_files = [f for f in os.listdir(per_dir)
                                  if os.path.isfile(os.path.join(per_dir, f))]
                     if not tmp_files:
-                        errors.append(f"{name}: cbmread produced no file")
+                        errors.append(f"{cbm_display(name)}: cbmread produced no file")
                         continue
                     local_file = os.path.join(per_dir, tmp_files[0])
 
@@ -2285,7 +2299,7 @@ class DiskMasher(tk.Tk):
                         capture_output=True, text=True, timeout=30)
                     if r2.returncode != 0:
                         errors.append(
-                            f"{name}: {(r2.stderr.strip() or r2.stdout.strip() or 'c1541 error')}")
+                            f"{cbm_display(name)}: {(r2.stderr.strip() or r2.stdout.strip() or 'c1541 error')}")
                     else:
                         ok += 1
 
@@ -3164,14 +3178,14 @@ class DiskMasher(tk.Tk):
                     for i, (blk, name, ftype) in enumerate(snap, 1):
                         if cancel_event.is_set():
                             return
-                        set_msg(f"[{i}/{len(snap)}]  {name}", fraction=(i - 1) / len(snap), detail=det3)
+                        set_msg(f"[{i}/{len(snap)}]  {cbm_display(name)}", fraction=(i - 1) / len(snap), detail=det3)
                         sub = tempfile.mkdtemp(dir=tmpdir)
                         err = cbm_read_file(DRIVE, name, sub, proc_store, ftype)
                         got = os.listdir(sub)
                         if not err and len(got) != 1:
                             err = f"expected one file, got {len(got)}"
                         if err:
-                            outcome["abort"] = f"Reading {name} failed:\n{err}\n\nDisk unchanged."
+                            outcome["abort"] = f"Reading {cbm_display(name)} failed:\n{err}\n\nDisk unchanged."
                             return
                         local_copy[i - 1] = os.path.join(tmpdir, f"{i:03d}-{got[0]}")
                         os.rename(os.path.join(sub, got[0]), local_copy[i - 1])
@@ -3214,13 +3228,13 @@ class DiskMasher(tk.Tk):
                 for i, (name, local) in enumerate(jobs, 1):
                     if cancel_event.is_set():
                         return
-                    set_msg(f"[{i}/{len(jobs)}]  Writing {name}", fraction=(i - 1) / len(jobs), detail=det4)
+                    set_msg(f"[{i}/{len(jobs)}]  Writing {cbm_display(name)}", fraction=(i - 1) / len(jobs), detail=det4)
                     if not os.path.exists(local):
-                        outcome["errors"].append(f"{name}: local copy missing")
+                        outcome["errors"].append(f"{cbm_display(name)}: local copy missing")
                         continue
                     err = cbm_write_file(DRIVE, local, name, proc_store)
                     if err:
-                        outcome["errors"].append(f"Write {name}: {err}")
+                        outcome["errors"].append(f"Write {cbm_display(name)}: {err}")
                     else:
                         _push_dir()
             except Exception as e:
