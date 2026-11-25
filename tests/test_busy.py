@@ -19,7 +19,7 @@ class BusyApp(unittest.TestCase):
         for name in ("_start_op", "_end_op", "_show_busy", "_when_free", "_close_stale",
                      "_build_busy_indicator", "_blink"):
             setattr(app, name, getattr(d.DiskMasher, name).__get__(app))
-        app._ops, app._op_label, app._refresh_pending = 0, "", False
+        app._ops, app._op_label, app._refresh_pending, app._local_ops = 0, "", False, 0
         app.IDLE_GREEN, app.BUSY_RED = d.DiskMasher.IDLE_GREEN, d.DiskMasher.BUSY_RED
         app.NO_DRIVE_GREY, app._have_drives = d.DiskMasher.NO_DRIVE_GREY, True
         app._build_busy_indicator(app)
@@ -33,6 +33,8 @@ class BusyApp(unittest.TestCase):
         app.cbm_pane, app.fs_pane = Pane(), Pane()
         app.cbm_pane._menubuttons = [ttk.Menubutton(app, text=t) for t in ("Read", "Drive")]
         app.fs_pane._write_btn = ttk.Button(app, text="Write")
+        self.frozen = []
+        app.fs_pane.set_frozen = self.frozen.append
 
         def refresh():
             if app._ops:
@@ -120,6 +122,19 @@ class Busy(BusyApp):
         self.app._start_op("Detecting drives", detect_finds_nothing)
         self.pump(lambda: self.app._ops == 0)
         self.assertEqual(self.busy(), "grey")
+
+    def test_local_operations_freeze_the_left_pane(self):
+        a, b = threading.Event(), threading.Event()
+        self.app._start_op("Formatting", a.wait)              # not local: pane stays free
+        self.assertEqual(self.frozen, [])
+        a.set()
+        self.pump(lambda: self.app._ops == 0)
+        self.app._start_op("Reading files", b.wait, local=True)
+        self.app._start_op("Recovering the bus", lambda: None)  # nested, not local
+        self.assertEqual(self.frozen, [True])
+        b.set()
+        self.pump(lambda: self.app._ops == 0)
+        self.assertEqual(self.frozen, [True, False])
 
     def test_new_action_closes_finished_windows(self):
         done, running = tk.Toplevel(self.app), tk.Toplevel(self.app)

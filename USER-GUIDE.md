@@ -47,7 +47,9 @@ The window has two panes side by side.
   idle, flashes red while it's working, and is grey when no drive answered the last scan (Detect, or the bus check
   after a Cancel). While it's red, the drive menus and **Write →** are greyed out: only
   one drive operation runs at a time. They come back when it's finished, including the directory refresh that
-  follows.
+  follows. The left pane stays usable for browsing, except during operations that read from or write into its
+  folder (writing files or an image, reading files or an image, Read to image, Sort, FB-ify): then it's greyed out
+  until they finish.
 
 Selecting: click selects one item, ⌘-click adds or removes items. Click an empty area below the list to clear the
 selection. The divider between the panes can be dragged; window size and divider position are remembered.

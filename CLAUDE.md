@@ -47,7 +47,10 @@ to disk (`FB_PATHS` maps platform → files).
   (from the Tk thread), never a bare `threading.Thread`. It counts running operations; while any runs, the drive
   menus and Write → are disabled, the dot at the right of the status bar flashes red (green when idle, grey when the last detect found no drive), the menu events (wrapped in
   `_when_free`) are refused, and `cbm_pane.refresh()` only sets `_refresh_pending`, run when the count is back to 0.
-  Operations started during one (Cancel's recovery, a follow-up reset) count as part of it. `c1541` threads stay
+  Operations started during one (Cancel's recovery, a follow-up reset) count as part of it. Pass `local=True`
+  when the operation reads from or writes into the left pane's folder: the left pane is frozen (`set_frozen`: a
+  "Frozen" bindtag swallows clicks and keys, the listbox stays enabled so `_load` can refill it). Task dialogs and
+  the spinner aren't modal (no grab); the busy flag does that job. `c1541` threads stay
   plain threads. Tested in `tests/test_busy.py`.
 - **Drive → Reset and Cancel share `_reset_and_check`:** `cbmctrl reset`, 2 s settle, detect; drives found →
   drive menu updated + refresh (which recovers a 74 head via `cbm_dir`); no answer → replug USB; no drive → power/cable.

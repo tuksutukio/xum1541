@@ -1089,7 +1089,7 @@ class FilesystemPane(ttk.Frame):
 
         nav = ttk.Frame(self)
         nav.pack(fill="x")
-        file_btn  = ttk.Menubutton(nav, text="File")
+        file_btn  = self._file_btn = ttk.Menubutton(nav, text="File")
         file_menu = tk.Menu(file_btn, tearoff=False)
         file_menu.add_command(label="New directory…", command=self._mkdir)
         file_menu.add_command(label="New image…",     command=self._new_image,
@@ -1098,7 +1098,8 @@ class FilesystemPane(ttk.Frame):
         file_menu.add_command(label="Move to Trash…", command=self._trash_selected)
         file_btn["menu"] = file_menu
         file_btn.pack(side="left", padx=4, pady=2)
-        ttk.Button(nav, text="Refresh", command=self._load).pack(side="left", padx=2, pady=2)
+        self._refresh_btn = ttk.Button(nav, text="Refresh", command=self._load)
+        self._refresh_btn.pack(side="left", padx=2, pady=2)
         self._write_btn = ttk.Button(nav, text="Write →", command=lambda: self.event_generate("<<WriteRequest>>"))
         self._write_btn.pack(side="right", padx=4, pady=2)
 
@@ -1114,6 +1115,12 @@ class FilesystemPane(ttk.Frame):
         self.lb.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        # While an operation uses this folder, a "Frozen" bindtag in front swallows clicks and
+        # keys (set_frozen); the listbox itself stays enabled so _load can still refill it.
+        self.bind_class("Frozen", "<Button>", lambda e: "break")
+        self.bind_class("Frozen", "<B1-Motion>", lambda e: "break")
+        self.bind_class("Frozen", "<Key>", lambda e: "break")
+        self._lb_fg = self.lb.cget("foreground")
         self.lb.bind("<Double-1>",        self._on_double)
         self.lb.bind("<Return>",          self._on_double)
         self.lb.bind("<Command-Up>",      lambda e: self._go_up())
@@ -1126,6 +1133,14 @@ class FilesystemPane(ttk.Frame):
         self._sel_var   = tk.StringVar()
         ttk.Label(self, textvariable=self._stats_var, anchor="w", padding=(6, 2)).pack(fill="x")
         ttk.Label(self, textvariable=self._sel_var,   anchor="w", padding=(6, 2)).pack(fill="x")
+
+    def set_frozen(self, frozen):
+        """Lock the pane while a drive operation reads from or writes into its folder."""
+        tags = [t for t in self.lb.bindtags() if t != "Frozen"]
+        self.lb.bindtags(tuple((["Frozen"] if frozen else []) + tags))
+        self.lb.configure(foreground="#808080" if frozen else self._lb_fg)
+        for b in (self._file_btn, self._refresh_btn):
+            b.configure(state="disabled" if frozen else "normal")
 
     def _update_sel(self):
         files = self.selected_files()
@@ -1643,6 +1658,7 @@ class DiskMasher(tk.Tk):
         # One drive operation at a time: _start_op counts running operations; while any
         # runs, the drive menus and Write are disabled and a refresh waits for the end.
         self._ops = 0
+        self._local_ops = 0             # of those, operations using the left pane's folder
         self._op_label = ""
         self._have_drives = False       # set by detect and Cancel's bus check
         self._refresh_pending = False
@@ -1764,23 +1780,33 @@ class DiskMasher(tk.Tk):
         self._busy_dot.itemconfigure(self._busy_oval, state="normal" if on else "hidden")
         self._busy_blink = self.after(500, self._blink)
 
-    def _start_op(self, label, target):
+    def _start_op(self, label, target, local=False):
         """Run `target` in a worker thread as a drive operation. Call from the Tk thread.
         Operations started while one runs (a refresh at its end, Cancel's recovery) count
-        as part of it; the bus is free again when the count is back to 0."""
+        as part of it; the bus is free again when the count is back to 0. local=True: the
+        operation reads from or writes into the left pane's folder, so that pane is frozen
+        until it ends (other operations leave it usable)."""
         self._ops += 1
         if self._ops == 1:
             self._op_label = label
             self._show_busy(True)
+        if local:
+            self._local_ops += 1
+            if self._local_ops == 1:
+                self.fs_pane.set_frozen(True)
 
         def wrapper():
             try:
                 target()
             finally:
-                self.after(0, self._end_op)
+                self.after(0, lambda: self._end_op(local))
         threading.Thread(target=wrapper, daemon=True).start()
 
-    def _end_op(self):
+    def _end_op(self, local=False):
+        if local:
+            self._local_ops -= 1
+            if self._local_ops == 0:
+                self.fs_pane.set_frozen(False)
         self._ops -= 1
         if self._ops == 0:
             self._show_busy(False)
@@ -1823,12 +1849,12 @@ class DiskMasher(tk.Tk):
         self._sv.set(msg)
 
     def _make_spinner(self, message):
-        """Small modal progress overlay with no cancel. Returns close_fn."""
+        """Small progress overlay with no cancel. Returns close_fn. Not modal: the busy flag
+        (_start_op) keeps the drive controls locked, and the left pane stays usable."""
         dlg = tk.Toplevel(self)
         dlg.title("")
         dlg.resizable(False, False)
         dlg.transient(self)
-        dlg.grab_set()
         dlg.protocol("WM_DELETE_WINDOW", lambda: None)
         self.update_idletasks()
         x = self.winfo_x() + self.winfo_width()  // 2 - 160
@@ -1841,7 +1867,8 @@ class DiskMasher(tk.Tk):
         return dlg.destroy
 
     def _make_task_dialog(self, title, message):
-        """Modal progress dialog with Cancel button.
+        """Progress dialog with Cancel button. Not modal (no grab): the busy flag keeps the
+        drive controls locked while it runs, and the left pane stays usable for browsing.
         Returns (set_msg, close_fn, cancel_event, proc_store).
 
         set_msg(msg, fraction=None, detail=None) may be called from any thread. With a
@@ -1856,7 +1883,6 @@ class DiskMasher(tk.Tk):
         dlg.title(title)
         dlg.resizable(False, False)
         dlg.transient(self)
-        dlg.grab_set()
         dlg.protocol("WM_DELETE_WINDOW", lambda: None)
         self.update_idletasks()
         x = self.winfo_x() + self.winfo_width()  // 2 - 220
@@ -2220,7 +2246,7 @@ class DiskMasher(tk.Tk):
                                      (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        self._start_op('Reading files', run)
+        self._start_op('Reading files', run, local=True)
 
     def _read_to_image(self):
         left_files = self.fs_pane.selected_files()
@@ -2317,7 +2343,7 @@ class DiskMasher(tk.Tk):
                         (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        self._start_op('Reading to image', run)
+        self._start_op('Reading to image', run, local=True)
 
     def _write_to_cbm(self):
         files = self.fs_pane.selected_files()
@@ -2372,7 +2398,7 @@ class DiskMasher(tk.Tk):
                                      (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        self._start_op('Writing files', run)
+        self._start_op('Writing files', run, local=True)
 
     def _write_image_to_cbm(self, path):
         size     = os.path.getsize(path)
@@ -2516,7 +2542,7 @@ class DiskMasher(tk.Tk):
                     prog._finish()
                 self.after(0, done)
 
-            self._start_op('Writing image', run)
+            self._start_op('Writing image', run, local=True)
 
         ttk.Button(btn_frame, text="Write", command=_do_write).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
@@ -2710,7 +2736,7 @@ class DiskMasher(tk.Tk):
                     prog._finish()
                 self.after(0, done)
 
-            self._start_op('Reading image', run)
+            self._start_op('Reading image', run, local=True)
 
         fname_entry.bind("<Return>", lambda e: _do_read())
         dlg.wait_window()
@@ -3278,7 +3304,7 @@ class DiskMasher(tk.Tk):
                     shutil.rmtree(tmpdir, ignore_errors=True)
                 self.after(0, done)
 
-        self._start_op(verb, run)
+        self._start_op(verb, run, local=True)
 
     def _sort_disk(self):
         if not self.cbm_pane._entries:
