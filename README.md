@@ -24,9 +24,9 @@ It is **not** a general-purpose file manager. The left pane is intentionally rea
 - **Read files** — read one or more files from the drive to the current local directory via `cbmread`; left pane refreshes after each file
 - **Scratch files** — delete one or more files from the drive via `cbmctrl`; right pane refreshes after each scratch
 - **Write disk image** — write a `.d64`, `.d71`, or `.d81` image to the drive via `d64copy`/`imgcopy` with streaming progress
-- **Read disk to image** — read the entire disk from the drive into a local image file via `d64copy` with streaming progress and configurable retry count for bad sectors
-- **FB-ify disk** — write a File Browser boot file to the disk; platform variants: C16/Plus4, C64, C128, VIC-20 (all five memory-configuration variants), All
-- **Sort disk** — reorganise files on disk: optional FB first, PRGs alphabetically, then SEQ/USR/REL; optional image backup before sorting
+- **Read disk to image** — read the entire disk from the drive into a local image file via `d64copy` with streaming progress and configurable retry count for bad sectors. A quick disk check (tracks 18 and 36) first picks 35 or 40 tracks and explains why, so a 40-track disk isn't silently cut short; double-sided disks are refused until `.d71` reading exists. Afterwards the log lists the image's files, read errors and any data on tracks 36–40. An interrupted read is kept as `…-incomplete.d64`, never under the real name
+- **FB-ify disk** — write a File Browser boot file to the disk; platform variants: C16/Plus4, C64, C128, VIC-20 (all five memory-configuration variants), All; same safety steps as Sort
+- **Sort disk** — reorganise files on disk: optional FB first, PRGs alphabetically, then SEQ/USR/REL. Before anything is scratched, it checks the disk, reads the whole disk to an image (35 or 40 tracks, about a minute) and analyses it, then reads every file; a double-sided disk, files reaching beyond track 35, read errors inside files, unsupported file types, or a disk swapped since the listing stop it with the disk unchanged. The dialog shows each step, real progress and the time left. Keeping the image is optional; if rewriting fails after the scratch, the read files go to a `…_rescue` folder and the image is kept
 
 ### Disk image operations *(requires VICE/c1541)*
 - **Create new image** — create a blank `.d64` image (35-track, 174848 bytes) in the current local directory; disk name and filename are kept in sync; d71/d81 greyed out pending implementation
@@ -38,7 +38,7 @@ It is **not** a general-purpose file manager. The left pane is intentionally rea
 - Multi-select with Cmd-click (macOS convention) on both panes
 - Right pane: disk name, ID, file count, blocks free; selection line shows blocks and kB for selected files
 - Left pane: folder and file counts, total kB; selection line shows image format info and blocks free (queried live from the image via c1541) or file count and size for non-image selections
-- Cancel button on all long-running operations — sends SIGTERM, then SIGKILL after one second, then `cbmctrl reset`, followed by a health check that probes `cbmctrl detect` for up to ten seconds and reports whether the bus is responsive or the USB cable needs replugging
+- Cancel button on all long-running operations — sends SIGTERM and gives the tool up to three seconds to let go of the bus (SIGKILL only if it doesn't), then `cbmctrl reset`, then a `cbmctrl detect` health check that reports one of: bus OK (with the drives found), no drive answering (check power and cable), or the xum1541 not responding (replug USB)
 - Status bar with operation feedback throughout
 - Single-instance enforcement via PID file
 - Auto-detect drives and refresh disk directory on startup
@@ -58,6 +58,9 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 
 ## Planned and to-do
 
+### Drive operations
+- Make a file the first one in the directory — mark a file in the right pane and move it to the first directory slot, so it loads with `LOAD"*",8` / `LOAD"*",8,1` (requested 2026-11-25)
+
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)
 - Scratch files from a local image via `c1541`
@@ -69,6 +72,7 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 - `.d71`/`.d81` full support throughout (browse, read-to-image, create)
 
 ### Infrastructure
+- One IEC operation at a time — a busy flag or lock shared by everything that touches the drive (write, read, format, FB-ify, sort, scratch, refresh, detect), so two worker threads can never drive the bus at once; plus a visible busy indicator for operations that have no progress window (scratch, refresh, read files)
 - Startup dependency check for opencbm tools (`cbmctrl`, `d64copy`, `cbmwrite`, `cbmread`) with clear install instructions if missing
 - xum1541 USB reset via macOS IOKit — programmatic recovery from firmware lockup without physically replugging the USB cable
 - Write verify — read back after each `cbmwrite` to catch flaky sectors

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -76,6 +77,290 @@ IMAGE_FORMATS = {
     819200: ("d81 (1581)",              ".d81", False, False),
 }
 
+# --- Disk image analysis (pure functions on image bytes; no drive access) ---
+
+SECTORS_PER_TRACK = [21] * 17 + [19] * 7 + [18] * 6 + [17] * 10   # tracks 1–40 (1541 zones)
+FILE_TYPES = {0: "DEL", 1: "SEQ", 2: "PRG", 3: "USR", 4: "REL"}
+
+
+def _blk(track, sector):
+    """Block index of track/sector in a d64 image."""
+    return sum(SECTORS_PER_TRACK[:track - 1]) + sector
+
+
+def analyze_image(data):
+    """Inspect a single-sided .d64 (35 or 40 tracks, with or without error bytes).
+
+    Returns a dict: tracks, disk_name, double_sided, ext_bam, files (name, type, blocks,
+    max_track, problem), bad_sectors {track: count}, data_beyond_35 (tracks 36–40 hold
+    non-blank sectors that no file uses), and problems (reasons Sort/FB-ify must not
+    rewrite this disk). Raises ValueError for sizes it doesn't handle (.d71, .d81)."""
+    sizes = {174848: (35, False), 175531: (35, True), 196608: (40, False), 197376: (40, True)}
+    if len(data) not in sizes:
+        raise ValueError(f"unsupported image size {len(data)}")
+    tracks, has_err = sizes[len(data)]
+    nblocks = sum(SECTORS_PER_TRACK[:tracks])
+    errors  = data[nblocks * 256:] if has_err else b""
+
+    def sector(t, s):
+        o = _blk(t, s) * 256
+        return data[o:o + 256]
+
+    def valid(t, s):
+        return 1 <= t <= tracks and 0 <= s < SECTORS_PER_TRACK[t - 1]
+
+    bam = sector(18, 0)
+    res = {
+        "tracks": tracks,
+        "disk_name": bam[0x90:0xA0].rstrip(b"\xa0").decode("latin-1"),
+        "double_sided": bam[3] == 0x80,   # drive-1571-users-guide-1985 p.116
+        "ext_bam": None, "files": [], "bad_sectors": {}, "data_beyond_35": [],
+        "problems": [],
+    }
+    # Extended-BAM hint only (layouts not in c64doc; seen: cbmforng -x writes $C0–$D3).
+    if any(bam[0xC0:0xD4]):
+        res["ext_bam"] = "SpeedDOS-style ($C0)"
+    elif any(bam[0xAC:0xC0]):
+        res["ext_bam"] = "DolphinDOS-style ($AC)"
+
+    if has_err:
+        for t in range(1, tracks + 1):
+            bad = sum(1 for s in range(SECTORS_PER_TRACK[t - 1])
+                      if errors[_blk(t, s)] not in (0, 1))
+            if bad:
+                res["bad_sectors"][t] = bad
+
+    def is_bad(t, s):
+        return has_err and errors[_blk(t, s)] not in (0, 1)
+
+    used = set()
+    # Directory chain from 18/1.
+    t, s, seen_dir = 18, 1, set()
+    dir_sectors = []
+    while t != 0:
+        if not valid(t, s) or (t, s) in seen_dir:
+            res["problems"].append("directory chain is broken")
+            break
+        seen_dir.add((t, s))
+        dir_sectors.append((t, s))
+        blk = sector(t, s)
+        t, s = blk[0], blk[1]
+    used |= seen_dir | {(18, 0)}
+
+    for dt, ds in dir_sectors:
+        blk = sector(dt, ds)
+        for i in range(8):
+            e = blk[32 * i: 32 * i + 32]
+            ftype = e[2]
+            if ftype == 0:
+                continue                      # empty or scratched slot
+            name  = e[5:21].rstrip(b"\xa0").decode("latin-1")
+            kind  = FILE_TYPES.get(ftype & 0x07, "?")
+            f = {"name": name, "type": kind, "blocks": e[30] | (e[31] << 8),
+                 "max_track": 0, "problem": None}
+            if not ftype & 0x80:
+                f["problem"] = "not closed properly (splat file)"
+            elif kind in ("REL", "DEL", "?") or e[0x18]:
+                f["problem"] = ("unsupported file type " +
+                                ("(GEOS)" if e[0x18] else f"({kind})"))
+            if kind == "DEL":
+                res["files"].append(f)        # separators: no chain worth following
+                continue
+            # Follow the data chain.
+            ct, cs, chain = e[3], e[4], []
+            while ct != 0:
+                if not valid(ct, cs):
+                    f["problem"] = f["problem"] or f"chain points to track {ct} sector {cs}"
+                    break
+                if (ct, cs) in chain or len(chain) > nblocks:
+                    f["problem"] = f["problem"] or "chain loops"
+                    break
+                chain.append((ct, cs))
+                if is_bad(ct, cs):
+                    f["problem"] = f["problem"] or f"read error in track {ct} sector {cs}"
+                blk2 = sector(ct, cs)
+                ct, cs = blk2[0], blk2[1]
+            used |= set(chain)
+            f["max_track"] = max((c[0] for c in chain), default=0)
+            if f["max_track"] > 35:
+                f["problem"] = f["problem"] or f"uses track {f['max_track']} (beyond 35)"
+            res["files"].append(f)
+
+    def blank(t, s):
+        b = sector(t, s)
+        return not any(b) or (b[0] == 0x4B and not any(x != 1 for x in b[1:]))
+
+    for t in range(36, tracks + 1):
+        if any(not blank(t, s) and (t, s) not in used and not is_bad(t, s)
+               for s in range(SECTORS_PER_TRACK[t - 1])):
+            res["data_beyond_35"].append(t)
+
+    if res["double_sided"]:
+        res["problems"].append("the disk is double-sided (1571); only one side was read")
+    for f in res["files"]:
+        if f["problem"]:
+            res["problems"].append(f'"{f["name"]}": {f["problem"]}')
+    return res
+
+
+def describe_image(info):
+    """Human-readable lines for an analyze_image() result."""
+    lines = [f'{info["tracks"]}-track image, {len(info["files"])} file(s).']
+    if info["ext_bam"]:
+        lines.append(f'Extended BAM found: {info["ext_bam"]}.')
+    if info["bad_sectors"]:
+        lines.append("Read errors: " + ", ".join(
+            f"track {t}: {n} sector{'s' if n > 1 else ''}" for t, n in info["bad_sectors"].items()))
+    if info["data_beyond_35"]:
+        lines.append("Data outside any file on track(s) " +
+                     ", ".join(map(str, info["data_beyond_35"])) +
+                     " (loader data or leftovers; kept in the image).")
+    lines += info["problems"]
+    return lines
+
+
+def reset_and_settle():
+    """`cbmctrl reset` + 2 s for the drive to re-initialise. Run before every d64copy:
+    right after a cbmread/cbmwrite, d64copy can stall (tested 2026-11-25 on a 1571: a
+    track-36 read hung every time, and a full 40-track read stalled at track 31 and left
+    the drive unresponsive until a power cycle). A reset first fixed it."""
+    _run_bounded(["cbmctrl", "reset"], 5)
+    time.sleep(2)
+
+
+def stream_cmd(cmd, on_text, proc_store=None):
+    """Run cmd under a pty (opencbm tools buffer their progress output on a pipe) and call
+    on_text(chunk) from this thread as output arrives. Returns the exit code.
+    Call from a worker thread; proc_store[0] holds the process while it runs."""
+    import select as _select
+    master_fd, slave_fd = pty.openpty()
+    try:
+        proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd,
+                                stdin=subprocess.DEVNULL, close_fds=True)
+    finally:
+        os.close(slave_fd)
+    if proc_store is not None:
+        proc_store[0] = proc
+    try:
+        while True:
+            try:
+                r, _, _ = _select.select([master_fd], [], [], 1.0)
+                if r:
+                    chunk = os.read(master_fd, 4096)
+                    if not chunk:
+                        break
+                    on_text(chunk.decode("utf-8", errors="replace")
+                            .replace("\r\n", "\n").replace("\r", "\n"))
+                elif proc.poll() is not None:
+                    break
+            except OSError:
+                break
+        proc.wait()
+        return proc.returncode
+    finally:
+        if proc_store is not None:
+            proc_store[0] = None
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+
+_D64COPY_PROGRESS = re.compile(r'(\d+):\s*\S*\s+(\d+)%\s+(\d+)/(\d+)')
+
+
+def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_event=None):
+    """Read the whole disk with d64copy (35 or 40 tracks) into `path`.
+    on_progress(track, fraction) is called from this thread. Returns None when the read is
+    complete, else an error string. d64copy creates the file at full size before reading,
+    so completeness is judged from its output ('N blocks copied.') and exit code."""
+    cmd = ["d64copy"] + (["--end-track", "40"] if tracks == 40 else []) + [DRIVE, path]
+    out = []
+    def _text(t):
+        out.append(t)
+        if on_progress:
+            m = None
+            for m in _D64COPY_PROGRESS.finditer(t):
+                pass
+            if m:
+                on_progress(int(m.group(1)), int(m.group(3)) / max(1, int(m.group(4))))
+    reset_and_settle()
+    if cancel_event is not None and cancel_event.is_set():
+        return "cancelled"      # nothing registered in proc_store yet: don't start d64copy
+    try:
+        rc = stream_cmd(cmd, _text, proc_store)
+    except OSError as e:
+        return str(e)
+    text = "".join(out)
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    if rc == 0 and size in IMAGE_FORMATS and re.search(r'\d+ blocks copied', text):
+        return None
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return lines[-1] if lines else f"d64copy exit code {rc}"
+
+
+def probe_disk(proc_store=None, cancel_event=None, track18=True):
+    """Quick read-only look at the disk in the drive (about 3 s per track on a 1571).
+
+    Reads track 18 (BAM: name, double-sided flag, extended BAM) and track 36 (is the disk
+    formatted beyond 35 tracks, and does that area hold data?). Returns a dict with error,
+    double_sided, ext_bam, disk_name, t36_readable (some sector read OK), t36_data.
+    Not yet seen on hardware: a disk whose track 36 was never formatted; a 30 s watchdog
+    covers the case where d64copy hangs on it."""
+    res = {"error": None, "double_sided": False, "ext_bam": None, "disk_name": "",
+           "t36_readable": False, "t36_data": False, "t36_checked": False}
+    reset_and_settle()
+    if cancel_event is not None and cancel_event.is_set():
+        res["error"] = "cancelled"
+        return res
+    with tempfile.TemporaryDirectory() as tmp:
+        if track18:
+            p18 = os.path.join(tmp, "t18.d64")
+            r = _run_bounded(["d64copy", "-s", "18", "-e", "18", DRIVE, p18], 30, proc_store)
+            if cancel_event is not None and cancel_event.is_set():
+                res["error"] = "cancelled"
+                return res
+            data = open(p18, "rb").read() if os.path.exists(p18) else b""
+            if r is None or r[0] != 0 or len(data) not in IMAGE_FORMATS or \
+                    not re.search(r'\d+ blocks copied', r[1]):
+                res["error"] = "could not read the directory track (18)"
+                return res
+            bam = data[_blk(18, 0) * 256:_blk(18, 0) * 256 + 256]
+            res["double_sided"] = bam[3] == 0x80
+            res["disk_name"] = bam[0x90:0xA0].rstrip(b"\xa0").decode("latin-1")
+            res["ext_bam"] = ("SpeedDOS-style" if any(bam[0xC0:0xD4]) else
+                              "DolphinDOS-style" if any(bam[0xAC:0xC0]) else None)
+        p36 = os.path.join(tmp, "t36.d64")
+        r = _run_bounded(["d64copy", "-s", "36", "-e", "36", "-r", "0", DRIVE, p36], 30, proc_store)
+        if cancel_event is not None and cancel_event.is_set():
+            res["error"] = "cancelled"
+            return res
+        if r is None:
+            # The watchdog stopped d64copy. Don't guess "35 tracks" from that: callers
+            # must tell the user the check failed (t36_checked stays False).
+            reset_and_settle()
+            return res
+        res["t36_checked"] = True
+        data = open(p36, "rb").read() if os.path.exists(p36) else b""
+        if len(data) == 196608 and r[0] == 0 and re.search(r'\d+ blocks copied', r[1]):
+            # No error table: d64copy left it out because nothing failed (seen on full
+            # reads; single-track reads have so far always included one).
+            res["t36_readable"] = True
+            b = data[_blk(36, 0) * 256:_blk(37, 0) * 256]
+            res["t36_data"] = any(any(b[i:i + 256]) and not (b[i] == 0x4B and not any(
+                x != 1 for x in b[i + 1:i + 256])) for i in range(0, len(b), 256))
+        elif len(data) == 197376:                    # 40 tracks + error bytes
+            codes = [data[196608 + _blk(36, s)] for s in range(17)]
+            res["t36_readable"] = any(c == 1 for c in codes)
+            for s in range(17):
+                if codes[s] != 1:
+                    continue
+                b = data[_blk(36, s) * 256:_blk(36, s) * 256 + 256]
+                if any(b) and not (b[0] == 0x4B and not any(x != 1 for x in b[1:])):
+                    res["t36_data"] = True
+    return res
+
+
 def _bind_mac_multiselect(lb):
     """Make Command-click toggle items in extended-select Listbox (macOS convention)."""
     def _cmd_click(event):
@@ -91,12 +376,72 @@ def _bind_mac_multiselect(lb):
 
 # --- CBM helpers ---
 
+def _stop_proc(proc, grace=3.0):
+    """Stop an opencbm process: SIGTERM, wait up to `grace` s, SIGKILL only if it is still alive.
+    A hard kill mid-IEC-transaction is what has wedged the xum1541 before, so the
+    gentle signal always gets its chance first."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.1)
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _run_bounded(cmd, timeout, proc_store=None):
+    """Run a short command. Returns (returncode, output), or None if it hung past `timeout`.
+    Unlike subprocess.run(timeout=…), a hung process is stopped with _stop_proc, not SIGKILL.
+    With proc_store, the process sits in proc_store[0] while it runs, so Cancel can stop it."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace")
+    except OSError as e:
+        return -1, str(e)
+    if proc_store is not None:
+        proc_store[0] = proc
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out
+    except subprocess.TimeoutExpired:
+        _stop_proc(proc)
+        try:
+            proc.communicate(timeout=2)
+        except Exception:
+            pass
+        return None
+    finally:
+        if proc_store is not None:
+            proc_store[0] = None
+
+
 def cbm_detect():
     try:
         r = subprocess.run(["cbmctrl", "detect"], capture_output=True, text=True, timeout=5)
         return r.stdout.strip()
     except Exception as e:
         return f"Error: {e}"
+
+
+def drive_status(drive=DRIVE, timeout=120):
+    """Read the drive's error channel; returns (code, text), code None if unreadable.
+    `cbmctrl command` returns as soon as the command is sent and the drive works on
+    afterwards (V0 returned in 0.1 s, the status read then waited 2.7 s), so reading the
+    status is how to wait until a command has finished, before the next bus request."""
+    r = _run_bounded(["cbmctrl", "status", drive], timeout)
+    if r is None or r[0] != 0:
+        return None, (r[1].strip() if r else "status read timed out")
+    text = r[1].strip()
+    m = re.match(r'\s*(\d+)\s*,', text)
+    return (int(m.group(1)) if m else None), text
 
 
 def cbm_dir(drive=DRIVE):
@@ -126,22 +471,42 @@ def parse_cbm_dir(raw):
     return disk_name, disk_id, entries, blocks_free
 
 
+_OPENCBM_FAILURE = re.compile(
+    r'\[Fatal\]|error status|error (reading|writing)|FILE NOT FOUND', re.I)
+
+def _opencbm_error(output):
+    """The failure lines in cbmread/cbmwrite output, or None. Both tools can exit 0 on a
+    failed transfer and only print a [Warning] (tested 2026-11-25: cbmread on a file whose
+    chain reaches track 36 gave '67,ILLEGAL TRACK OR SECTOR,36,00', exit 0, no file).
+    Not every [Warning] is a failure: 'could not identify drive, using no turbo' (seen
+    right after a drive power cycle) still transfers the file."""
+    bad = [l.strip() for l in (output or "").splitlines() if _OPENCBM_FAILURE.search(l)]
+    return " / ".join(bad) or None
+
+
 def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None):
-    """Read a single file from CBM drive into dest_dir. Returns error string or None."""
+    """Read a single file from CBM drive into dest_dir. Returns error string or None.
+    Success means: no failure line in cbmread's output, and the file it names exists."""
     try:
         proc = subprocess.Popen(
             ["cbmread", drive, cbm_name],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, cwd=dest_dir)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", cwd=dest_dir)
         if proc_store is not None:
             proc_store[0] = proc
         try:
-            _, stderr = proc.communicate(timeout=300)
+            out, _ = proc.communicate(timeout=300)
         finally:
             if proc_store is not None:
                 proc_store[0] = None
-        if "[Fatal]" in stderr or "FILE NOT FOUND" in stderr:
-            return stderr.strip()
+        err = _opencbm_error(out)
+        if err:
+            return err
+        if proc.returncode != 0:
+            return out.strip() or f"cbmread returned {proc.returncode}"
+        m = re.search(r'-> (.+?)\s*$', out, re.M)
+        if not m or not os.path.isfile(os.path.join(dest_dir, m.group(1))):
+            return "cbmread reported success but wrote no file"
         return None
     except subprocess.TimeoutExpired:
         proc.kill()
@@ -154,16 +519,20 @@ def cbm_write_file(drive, local_path, cbm_name=None, proc_store=None):
     """Write a local file to CBM drive, optionally with a specific CBM filename."""
     cmd = ["cbmwrite", "-o", cbm_name, drive, local_path] if cbm_name else ["cbmwrite", drive, local_path]
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace")
         if proc_store is not None:
             proc_store[0] = proc
         try:
-            _, stderr = proc.communicate(timeout=300)
+            out, _ = proc.communicate(timeout=300)
         finally:
             if proc_store is not None:
                 proc_store[0] = None
+        err = _opencbm_error(out)
+        if err:
+            return err
         if proc.returncode != 0:
-            return stderr.strip() or f"cbmwrite returned {proc.returncode}"
+            return out.strip() or f"cbmwrite returned {proc.returncode}"
         return None
     except subprocess.TimeoutExpired:
         proc.kill()
@@ -544,6 +913,7 @@ class CbmDirPane(ttk.Frame):
 
     def _build(self):
         self._hdr = tk.StringVar(value=f"{DRIVE}:  (not refreshed)")
+        self.disk_name = ""
         ttk.Label(self, textvariable=self._hdr, anchor="w",
                   padding=(6, 3)).pack(fill="x")
 
@@ -610,6 +980,7 @@ class CbmDirPane(ttk.Frame):
             self._sel_status.set("")
             return
         disk_name, disk_id, entries, blocks_free = parse_cbm_dir(raw)
+        self.disk_name = disk_name     # last disk name read; the header text can say "refreshing…"
         self._hdr.set(f'{DRIVE}:  "{disk_name}"  {disk_id}')
         if blocks_free is not None:
             kb_free = blocks_free * 254 // 1024
@@ -762,8 +1133,14 @@ class DiskMasher(tk.Tk):
         return dlg.destroy
 
     def _make_task_dialog(self, title, message):
-        """Modal progress dialog with status label and Cancel button.
-        Returns (set_msg_fn, close_fn, cancel_event, proc_store)."""
+        """Modal progress dialog with Cancel button.
+        Returns (set_msg, close_fn, cancel_event, proc_store).
+
+        set_msg(msg, fraction=None, detail=None) may be called from any thread. With a
+        fraction (0–1) the bar shows real progress plus an estimate of the time left;
+        without one it goes back to the busy animation. `detail` is a second, smaller line
+        (e.g. "Step 2 of 4"); pass "" to clear it. An elapsed-time counter runs throughout,
+        so a long step never looks like a hang."""
         cancel_event = threading.Event()
         proc_store   = [None]
 
@@ -774,58 +1151,113 @@ class DiskMasher(tk.Tk):
         dlg.grab_set()
         dlg.protocol("WM_DELETE_WINDOW", lambda: None)
         self.update_idletasks()
-        x = self.winfo_x() + self.winfo_width()  // 2 - 200
-        y = self.winfo_y() + self.winfo_height() // 2 - 55
-        dlg.geometry(f"400x110+{x}+{y}")
+        x = self.winfo_x() + self.winfo_width()  // 2 - 220
+        y = self.winfo_y() + self.winfo_height() // 2 - 80
+        dlg.geometry(f"440x160+{x}+{y}")
 
-        msg_var = tk.StringVar(value=message)
-        ttk.Label(dlg, textvariable=msg_var, padding=(16, 10)).pack()
-        pb = ttk.Progressbar(dlg, mode="indeterminate", length=360)
+        detail_var = tk.StringVar(value="")
+        msg_var    = tk.StringVar(value=message)
+        time_var   = tk.StringVar(value="0:00")
+        ttk.Label(dlg, textvariable=detail_var, foreground="gray",
+                  padding=(16, 8, 16, 0)).pack(anchor="w")
+        ttk.Label(dlg, textvariable=msg_var, padding=(16, 2, 16, 6)).pack(anchor="w")
+        pb = ttk.Progressbar(dlg, mode="indeterminate", length=400, maximum=1000)
         pb.pack(padx=16)
         pb.start(10)
+        ttk.Label(dlg, textvariable=time_var, foreground="gray",
+                  padding=(16, 2, 16, 0)).pack(anchor="e")
+
+        started = time.monotonic()
+        state   = {"determinate": False, "frac_since": None}
+
+        def _tick():
+            if not dlg.winfo_exists():
+                return
+            el = int(time.monotonic() - started)
+            text = f"{el // 60}:{el % 60:02d} elapsed"
+            fs = state["frac_since"]
+            if state["determinate"] and fs:
+                t0, f0, f1 = fs
+                rate = (f1 - f0) / max(0.001, time.monotonic() - t0)
+                if f1 > f0 + 0.05 and rate > 0:
+                    left = int((1 - f1) / rate)
+                    text += f"  ·  about {left // 60}:{left % 60:02d} left"
+            time_var.set(text)
+            dlg.after(1000, _tick)
+        dlg.after(1000, _tick)
 
         def _cancel():
-            cancel_event.set()
-            if proc_store[0]:
-                try: proc_store[0].terminate()
-                except Exception: pass
             cancel_btn.configure(state="disabled")
-            self._set_status("Cancelled — checking bus…")
-            def _reset_and_probe():
-                import time as _time
-                _time.sleep(1)
-                if proc_store[0]:
-                    try: proc_store[0].kill()
-                    except Exception: pass
-                subprocess.run(["cbmctrl", "reset"], capture_output=True, timeout=5)
-                # probe until responsive or 10s elapsed
-                deadline = _time.monotonic() + 10
-                responsive = False
-                while _time.monotonic() < deadline:
-                    try:
-                        r = subprocess.run(["cbmctrl", "detect"],
-                                           capture_output=True, timeout=3)
-                        responsive = True
-                        break
-                    except Exception:
-                        pass
-                    _time.sleep(1)
-                if responsive:
-                    self.after(0, lambda: self._set_status("Cancelled — bus OK."))
-                else:
-                    self.after(0, lambda: (
-                        self._set_status("xum1541 unresponsive — replug USB cable."),
-                        messagebox.showerror("Bus unresponsive",
-                            "xum1541 is not responding.\n\nReplug the USB cable to recover.")))
-            threading.Thread(target=_reset_and_probe, daemon=True).start()
+            self._cancel_and_recover(proc_store, cancel_event)
 
         cancel_btn = ttk.Button(dlg, text="Cancel", command=_cancel)
-        cancel_btn.pack(pady=(6, 8))
+        cancel_btn.pack(pady=(4, 8))
 
-        def set_msg(msg):
-            self.after(0, lambda: msg_var.set(msg))
+        def set_msg(msg, fraction=None, detail=None):
+            def _apply():
+                if not dlg.winfo_exists():
+                    return
+                msg_var.set(msg)
+                if detail is not None:
+                    detail_var.set(detail)
+                if fraction is None:
+                    if state["determinate"]:
+                        pb.configure(mode="indeterminate", value=0)
+                        pb.start(10)
+                        state.update(determinate=False, frac_since=None)
+                else:
+                    if not state["determinate"]:
+                        pb.stop()
+                        pb.configure(mode="determinate")
+                        state.update(determinate=True,
+                                     frac_since=(time.monotonic(), fraction, fraction))
+                    else:
+                        t0, f0, _ = state["frac_since"]
+                        state["frac_since"] = (t0, f0, fraction)
+                    pb.configure(value=int(fraction * 1000))
+            self.after(0, _apply)
 
         return set_msg, dlg.destroy, cancel_event, proc_store
+
+    def _cancel_and_recover(self, proc_store, cancel_event):
+        """The one cancel sequence, shared by _make_task_dialog and _make_progress_window.
+
+        Sets cancel_event first: workers check it, stop after the current step and must not
+        touch the bus again (no directory refresh), because this sequence owns the bus until
+        it finishes. Then: SIGTERM → up to 3 s → SIGKILL, `cbmctrl reset`, a settle pause,
+        and a `cbmctrl detect` probe that tells three outcomes apart."""
+        cancel_event.set()
+        self._set_status("Cancelling — stopping transfer…")
+
+        def _run():
+            _stop_proc(proc_store[0])
+            self.after(0, lambda: self._set_status("Cancelled — resetting bus…"))
+            _run_bounded(["cbmctrl", "reset"], 5)
+            time.sleep(2)   # drives run their power-on init after a reset
+            r = _run_bounded(["cbmctrl", "detect"], 5)
+            drives = (re.findall(r'^\s*(\d+):\s*(\S+)', r[1], re.M)
+                      if r is not None and r[0] == 0 else [])
+            if drives:
+                found = ", ".join(f"{dev}: {model}" for dev, model in drives)
+                def _ok():
+                    self._set_status(f"Cancelled — bus OK ({found}).")
+                    self.cbm_pane.refresh()
+                self.after(0, _ok)
+            elif r is None:
+                self.after(0, lambda: (
+                    self._set_status("xum1541 unresponsive — replug USB cable."),
+                    messagebox.showerror("Bus unresponsive",
+                        "The xum1541 did not answer a drive scan.\n\n"
+                        "Replug its USB cable to recover. If that isn't enough, "
+                        "power-cycle the drive too.")))
+            else:
+                self.after(0, lambda: (
+                    self._set_status("Cancelled — no drive answers."),
+                    messagebox.showwarning("No drive",
+                        "The xum1541 responds, but no drive answered the scan.\n\n"
+                        "Check the drive's power and the IEC cable.")))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _detect_drives(self, on_done=None):
         self._set_status("Detecting drives…")
@@ -894,16 +1326,19 @@ class DiskMasher(tk.Tk):
                 proc_store[0] = None
                 if cancel_event.is_set():
                     break
-                if proc.returncode != 0:
-                    errors.append(name)
+                code, st = drive_status()      # waits until the drive has finished
+                if proc.returncode != 0 or code != 1:
+                    errors.append(f"{name}: {st}")
                 else:
                     ok += 1
                     raw = cbm_dir(DRIVE)
                     self.after(0, lambda r=raw: self.cbm_pane._apply_dir(r))
-            raw = cbm_dir(DRIVE)
+            # After a cancel the bus belongs to the cancel sequence, which refreshes itself.
+            raw = None if cancel_event.is_set() else cbm_dir(DRIVE)
             def done():
                 close()
-                self.cbm_pane._apply_dir(raw)
+                if raw is not None:
+                    self.cbm_pane._apply_dir(raw)
                 if cancel_event.is_set():
                     self._set_status(f"Scratch cancelled after {ok} file{'s' if ok != 1 else ''}.")
                 elif errors:
@@ -1095,7 +1530,8 @@ class DiskMasher(tk.Tk):
                     self.after(0, lambda r=raw: self.cbm_pane._apply_dir(r))
             def done():
                 close()
-                self.cbm_pane.refresh()
+                if not cancel_event.is_set():
+                    self.cbm_pane.refresh()
                 if errors:
                     messagebox.showerror("Write errors", "\n".join(errors))
                 if cancel_event.is_set():
@@ -1160,7 +1596,8 @@ class DiskMasher(tk.Tk):
             dname  = dname_var.get().strip() or "DISK"
             did    = did_var.get().strip() or "01"
             dlg.destroy()
-            prog, pbar, close_btn, _append, proc_store = self._make_progress_window(f"Writing {basename}…")
+            prog, pbar, close_btn, _append, proc_store, cancel_event = \
+                self._make_progress_window(f"Writing {basename}…")
             self._set_status(f"Writing {basename} to drive {DRIVE}…")
 
             def run():
@@ -1175,6 +1612,27 @@ class DiskMasher(tk.Tk):
                         self.after(0, lambda: _append("\nFormat failed — aborting write.\n"))
                         ok = False
 
+                if cancel_event.is_set():
+                    ok = False
+                if ok and is_40track and not do_fmt:
+                    # Writing tracks 36–40 onto a disk not formatted that far gives seek
+                    # errors (opencbm-tools.md), so check the target first.
+                    self.after(0, lambda: _append("Checking that the disk has track 36…\n"))
+                    pr = probe_disk(proc_store, cancel_event, track18=False)
+                    if cancel_event.is_set():
+                        ok = False
+                    elif not pr["t36_checked"]:
+                        self.after(0, lambda: _append(
+                            "\nCouldn't check track 36 (the read timed out). Write again with "
+                            "'Pre-format' ticked (it uses cbmforng -x).\n"))
+                        ok = False
+                    elif not pr["t36_readable"]:
+                        self.after(0, lambda: _append(
+                            "\nThis disk isn't formatted beyond track 35. Write again with "
+                            "'Pre-format' ticked (it uses cbmforng -x).\n"))
+                        ok = False
+                    else:
+                        self.after(0, lambda: _append("Track 36 is there.\n"))
                 if ok:
                     if ext == ".d81":
                         copy_cmd = ["imgcopy", path, DRIVE]
@@ -1185,13 +1643,17 @@ class DiskMasher(tk.Tk):
                     else:
                         copy_cmd = ["d64copy", path, DRIVE]
                     self.after(0, lambda: _append(f"\nCopying image…\n"))
-                    rc = self._pty_run(copy_cmd, _append, proc_store)
-                    ok = rc == 0
+                    reset_and_settle()
+                    rc = 1 if cancel_event.is_set() else self._pty_run(copy_cmd, _append, proc_store)
+                    ok = rc == 0 and not cancel_event.is_set()
 
                 def done():
                     pbar.stop()
                     pbar.pack_forget()
-                    if ok:
+                    if cancel_event.is_set():
+                        _append("\nCancelled. The disk is incomplete.\n")
+                        prog.title("Write cancelled")
+                    elif ok:
                         _append("\nDone.\n")
                         prog.title("Write complete")
                         self._set_status(f"Wrote {basename} to drive {DRIVE}.")
@@ -1212,7 +1674,7 @@ class DiskMasher(tk.Tk):
     def _read_image_from_cbm(self):
         hdr      = self.cbm_pane._hdr.get()
         m        = re.search(r'"(.+?)"', hdr)
-        diskname = m.group(1).strip() if m else "disk"
+        diskname = self.cbm_pane.disk_name.strip() or (m.group(1).strip() if m else "disk")
         dest_dir = self.fs_pane.current_dir()
 
         dlg = tk.Toplevel(self)
@@ -1234,61 +1696,168 @@ class DiskMasher(tk.Tk):
         fname_entry = ttk.Entry(out_frame, textvariable=fname_var, width=26)
         fname_entry.grid(row=0, column=1, sticky="w", padx=4)
         ext40_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(out_frame, text="40-track  (--end-track 40)",
-                        variable=ext40_var).grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=4)
+        ttk.Checkbutton(out_frame, text="40-track  (--end-track 40)", variable=ext40_var,
+                        command=lambda: _explain()).grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=4, pady=4)
         ttk.Label(out_frame, text="Retries:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
         retry_var = tk.IntVar(value=5)
         ttk.Spinbox(out_frame, from_=0, to=100, textvariable=retry_var,
                     width=6).grid(row=2, column=1, sticky="w", padx=4)
 
+        check_frame = ttk.LabelFrame(dlg, text="Disk check", padding=(8, 4))
+        check_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        check_var = tk.StringVar(value="Checking the disk (tracks 18 and 36)…")
+        check_lbl = ttk.Label(check_frame, textvariable=check_var, justify="left", wraplength=380)
+        check_lbl.pack(anchor="w")
+        # Busy bar + seconds counter while the check runs (it takes 5–10 s), so the
+        # dialog doesn't look stuck; both go away when the result arrives.
+        check_bar = ttk.Progressbar(check_frame, mode="indeterminate", length=380)
+        check_bar.pack(anchor="w", pady=(4, 0))
+        check_bar.start(10)
+        check_started = time.monotonic()
+
+        def _tick_check():
+            if probe or not dlg.winfo_exists():
+                return
+            check_var.set(f"Checking the disk (tracks 18 and 36)…  "
+                          f"{int(time.monotonic() - check_started)} s")
+            dlg.after(1000, _tick_check)
+        dlg.after(1000, _tick_check)
+
         btn_frame = ttk.Frame(dlg)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=(4, 10))
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=(4, 10))
+        read_btn = ttk.Button(btn_frame, text="Read image", state="disabled",
+                              command=lambda: _do_read())
+        read_btn.pack(side="left", padx=8)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
+        probe = {}
+
+        def _explain():
+            """Say what the check found and whether the chosen track count fits it."""
+            if not probe:
+                return
+            if probe["error"]:
+                msg, warn = (f"Couldn't check the disk ({probe['error']}). "
+                             "Choose the track count yourself."), False
+            elif probe["double_sided"]:
+                msg, warn = ("Double-sided (1571) disk. Reading both sides to .d71 isn't "
+                             "supported yet, and a .d64 would hold only one side."), True
+            elif not probe["t36_checked"]:
+                msg = ("Couldn't check track 36 (the read timed out), so it's unknown whether "
+                       "this is a 40-track disk. Tick 40-track to be safe: on a 35-track disk "
+                       "the extra tracks just read as errors.")
+                warn = not ext40_var.get()
+            elif probe["t36_readable"]:
+                what = "holds data" if probe["t36_data"] else "is formatted but empty"
+                msg = f"Track 36 {what}: this is a 40-track disk."
+                warn = not ext40_var.get()
+                if warn:
+                    msg += " A 35-track image would leave tracks 36–40 out."
+            else:
+                msg, warn = "Standard 35-track disk.", False
+            if probe.get("ext_bam"):
+                msg += f" Extended BAM: {probe['ext_bam']}."
+            msg += "  Reading takes about a minute."
+            check_var.set(msg)
+            check_lbl.configure(foreground="red" if warn else "")
+
+        def _probed(res):
+            if not dlg.winfo_exists():
+                return
+            probe.update(res)
+            check_bar.stop()
+            check_bar.pack_forget()
+            ext40_var.set(bool(res["t36_readable"]))
+            read_btn.configure(state="disabled" if res["double_sided"] and not res["error"]
+                               else "normal")
+            _explain()
+
+        def _probe():
+            res = probe_disk()
+            self.after(0, lambda: _probed(res))
+        threading.Thread(target=_probe, daemon=True).start()
 
         def _do_read():
+            if str(read_btn.cget("state")) == "disabled":
+                return
             fname = fname_var.get().strip() or f"{diskname}.d64"
             if not fname.lower().endswith((".d64", ".d71", ".d81")):
                 fname += ".d64"
             out_path  = os.path.join(dest_dir, fname)
+            if os.path.exists(out_path) and not messagebox.askyesno(
+                    "Replace image?", f"{fname} already exists. Replace it?", parent=dlg):
+                return
             is_40     = ext40_var.get()
             retries   = retry_var.get()
             dlg.destroy()
-            prog, pbar, close_btn, _append, proc_store = self._make_progress_window(f"Reading disk to {fname}…")
+            prog, pbar, close_btn, _append, proc_store, cancel_event = \
+                self._make_progress_window(f"Reading disk to {fname}…")
             self._set_status(f"Reading drive {DRIVE} to {fname}…")
+            part = out_path + ".part"
 
             def run():
                 cmd = ["d64copy", "-r", str(retries)]
                 if is_40:
                     cmd += ["--end-track", "40"]
-                cmd += [DRIVE, out_path]
+                cmd += [DRIVE, part]
                 self.after(0, lambda: _append(f"Running: {' '.join(cmd)}\n\n"))
-                rc = self._pty_run(cmd, _append, proc_store)
-                ok = rc == 0
+                out = []
+                def _text(t):
+                    out.append(t)
+                    self.after(0, lambda t=t: _append(t))
+                reset_and_settle()
+                try:
+                    rc = 1 if cancel_event.is_set() else stream_cmd(cmd, _text, proc_store)
+                except OSError as e:
+                    rc = 1
+                    out.append(str(e))
+                text = "".join(out)
+                size = os.path.getsize(part) if os.path.exists(part) else 0
+                ok = (rc == 0 and size in IMAGE_FORMATS and not cancel_event.is_set()
+                      and re.search(r'\d+ blocks copied', text))
+                report, kept = [], None
+                if ok:
+                    os.replace(part, out_path)
+                    try:
+                        report = describe_image(analyze_image(open(out_path, "rb").read()))
+                    except (ValueError, OSError) as e:
+                        report = [f"(no analysis: {e})"]
+                elif os.path.exists(part):
+                    # d64copy fills the file to full size up front, so a partial read
+                    # looks complete. Keep it (a failing disk may not read again) but
+                    # under a name that says what it is.
+                    base, ext = os.path.splitext(out_path)
+                    kept, n = f"{base}-incomplete{ext}", 2
+                    while os.path.exists(kept):
+                        kept, n = f"{base}-incomplete-{n}{ext}", n + 1
+                    os.replace(part, kept)
 
                 def done():
                     pbar.stop()
                     pbar.pack_forget()
                     if ok:
-                        _append(f"\nSaved: {out_path}\n")
+                        _append(f"\nSaved: {out_path}\n" + "".join(f"  {l}\n" for l in report))
                         prog.title("Read complete")
                         self._set_status(f"Saved {fname}.")
-                        self.fs_pane._load()
                     else:
-                        _append("\nRead failed.\n")
-                        prog.title("Read failed")
-                        self._set_status("Read failed.")
+                        _append("\nCancelled." if cancel_event.is_set() else "\nRead failed.")
+                        _append(f" Partial image kept as {os.path.basename(kept)}.\n" if kept else "\n")
+                        prog.title("Read cancelled" if cancel_event.is_set() else "Read failed")
+                        if not cancel_event.is_set():
+                            self._set_status("Read failed.")
+                    self.fs_pane._load()
                     prog._finish()
                 self.after(0, done)
 
             threading.Thread(target=run, daemon=True).start()
 
-        ttk.Button(btn_frame, text="Read image", command=_do_read).pack(side="left", padx=8)
         fname_entry.bind("<Return>", lambda e: _do_read())
-        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
         dlg.wait_window()
 
     def _make_progress_window(self, title):
-        """Return (prog, pbar, close_btn, _append, proc_store) — progress Toplevel ready to use.
-        proc_store is a list; _pty_run appends the Popen object so Cancel can kill it."""
+        """Return (prog, pbar, close_btn, _append, proc_store, cancel_event): a progress Toplevel.
+        proc_store[0] holds the running Popen (set by _pty_run) so Cancel stops the right one;
+        after a cancel, workers must check cancel_event and leave the bus alone."""
         prog = tk.Toplevel(self)
         prog.title(title)
         prog.geometry("680x380")
@@ -1300,7 +1869,9 @@ class DiskMasher(tk.Tk):
         pbar.pack(padx=6, pady=(6, 2), fill="x")
         pbar.start(50)
 
-        proc_store = []
+        proc_store   = [None]
+        cancel_event = threading.Event()
+        finished     = [False]
 
         btn_row = ttk.Frame(prog)
         btn_row.pack(side="bottom", pady=(2, 8))
@@ -1315,48 +1886,25 @@ class DiskMasher(tk.Tk):
         vsb.pack(side="right", fill="y")
 
         def _cancel():
-            if proc_store:
-                try:
-                    proc_store[0].terminate()
-                except Exception:
-                    pass
+            if finished[0] or cancel_event.is_set():
+                return
             cancel_btn.configure(state="disabled")
-            self._set_status("Cancelled — checking bus…")
-            def _reset_and_probe():
-                import time as _time
-                _time.sleep(1)
-                try:
-                    if proc_store:
-                        proc_store[0].kill()
-                except Exception:
-                    pass
-                subprocess.run(["cbmctrl", "reset"], capture_output=True, timeout=5)
-                deadline = _time.monotonic() + 10
-                responsive = False
-                while _time.monotonic() < deadline:
-                    try:
-                        subprocess.run(["cbmctrl", "status"],
-                                       capture_output=True, timeout=2)
-                        responsive = True
-                        break
-                    except Exception:
-                        pass
-                    _time.sleep(1)
-                if responsive:
-                    self.after(0, lambda: self._set_status("Cancelled — bus OK."))
-                else:
-                    self.after(0, lambda: (
-                        self._set_status("xum1541 unresponsive — replug USB cable."),
-                        messagebox.showerror("Bus unresponsive",
-                            "xum1541 is not responding.\n\nReplug the USB cable to recover.")))
-            threading.Thread(target=_reset_and_probe, daemon=True).start()
+            _append("\nCancelling…\n")
+            self._cancel_and_recover(proc_store, cancel_event)
+
+        def _on_close_button():
+            # The window's close button: cancel while running, plain close once finished.
+            if finished[0]:
+                prog.destroy()
+            else:
+                _cancel()
 
         cancel_btn = ttk.Button(btn_row, text="Cancel", command=_cancel)
         cancel_btn.pack(side="left", padx=6)
         close_btn = ttk.Button(btn_row, text="Close", state="disabled", command=prog.destroy)
         close_btn.pack(side="left", padx=6)
 
-        prog.protocol("WM_DELETE_WINDOW", _cancel)
+        prog.protocol("WM_DELETE_WINDOW", _on_close_button)
 
         def _append(text):
             txt.configure(state="normal")
@@ -1365,42 +1913,19 @@ class DiskMasher(tk.Tk):
             txt.configure(state="disabled")
 
         def _finish():
+            finished[0] = True
             cancel_btn.configure(state="disabled")
             close_btn.configure(state="normal")
 
         prog._finish = _finish
 
-        return prog, pbar, close_btn, _append, proc_store
+        return prog, pbar, close_btn, _append, proc_store, cancel_event
 
     def _pty_run(self, cmd, _append, proc_store=None):
-        """Run cmd via pty, streaming output through _append. Returns exit code. Call from thread."""
-        import select as _select
+        """Run cmd via pty, streaming output to _append on the Tk thread. Returns exit code.
+        Call from a worker thread."""
         try:
-            master_fd, slave_fd = pty.openpty()
-            proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd,
-                                    stdin=subprocess.DEVNULL, close_fds=True)
-            os.close(slave_fd)
-            if proc_store is not None:
-                proc_store.append(proc)
-            while True:
-                try:
-                    r, _, _ = _select.select([master_fd], [], [], 1.0)
-                    if r:
-                        chunk = os.read(master_fd, 4096)
-                        if not chunk:
-                            break
-                        text = chunk.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-                        self.after(0, lambda t=text: _append(t))
-                    elif proc.poll() is not None:
-                        break
-                except OSError:
-                    break
-            proc.wait()
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
-            return proc.returncode
+            return stream_cmd(cmd, lambda t: self.after(0, lambda t=t: _append(t)), proc_store)
         except Exception as e:
             self.after(0, lambda: _append(f"\nError: {e}\n"))
             return 1
@@ -1493,18 +2018,24 @@ class DiskMasher(tk.Tk):
             cmd += [DRIVE, f"{dname},{did}"]
             dlg.destroy()
 
-            prog, pbar, close_btn, _append, proc_store = self._make_progress_window(
+            prog, pbar, close_btn, _append, proc_store, cancel_event = self._make_progress_window(
                 f"Formatting drive {DRIVE}…")
             self._set_status(f"Formatting drive {DRIVE} with {tool}…")
 
             def run():
-                subprocess.run(["cbmctrl", "reset"], capture_output=True, timeout=5)
-                rc = self._pty_run(cmd, _append, proc_store)
-                ok = rc == 0
+                _run_bounded(["cbmctrl", "reset"], 5)
+                rc = 1 if cancel_event.is_set() else self._pty_run(cmd, _append, proc_store)
+                ok = rc == 0 and not cancel_event.is_set()
 
                 def done():
                     pbar.stop()
                     pbar.pack_forget()
+                    if cancel_event.is_set():
+                        # The cancel sequence resets the bus and refreshes on its own.
+                        _append("\nCancelled. The disk is not usable until formatted again.\n")
+                        prog.title("Format cancelled")
+                        prog._finish()
+                        return
                     if ok:
                         _append("\nDone.\n")
                         prog.title("Format complete")
@@ -1514,9 +2045,11 @@ class DiskMasher(tk.Tk):
                         prog.title("Format failed")
                         self._set_status("Format failed.")
                     def _reset_and_refresh():
-                        subprocess.run(["cbmctrl", "reset"], capture_output=True, timeout=5)
-                        self.cbm_pane.refresh()
-                    self.after(1500, _reset_and_refresh)
+                        # In a thread: a hung reset must not freeze the UI.
+                        _run_bounded(["cbmctrl", "reset"], 5)
+                        self.after(0, self.cbm_pane.refresh)
+                    self.after(1500, lambda: threading.Thread(
+                        target=_reset_and_refresh, daemon=True).start())
                     prog._finish()
 
                 self.after(0, done)
@@ -1530,6 +2063,257 @@ class DiskMasher(tk.Tk):
         id_entry.bind("<Return>",   lambda e: _do_format())
 
         dlg.wait_window()
+
+    def _add_image_frame(self, dlg, row, enabled=True):
+        """The 'Safety copy' section of the Sort and FB-ify dialogs.
+        The whole disk is always read first; this only chooses whether the image is kept.
+        Returns a function giving (keep, path); call it before destroying dlg."""
+        hdr      = self.cbm_pane._hdr.get()
+        m        = re.search(r'"(.+?)"', hdr)
+        diskname = re.sub(r'[^a-zA-Z0-9_-]', '_', self.cbm_pane.disk_name.strip()
+                          or (m.group(1).strip() if m else "disk")).lower()
+        dest_dir = self.fs_pane.current_dir()
+        default  = os.path.join(dest_dir, f"{diskname}_backup.d64")
+        n = 2
+        while os.path.exists(default):   # never offer to overwrite an earlier backup
+            default = os.path.join(dest_dir, f"{diskname}_backup-{n}.d64")
+            n += 1
+
+        frame = ttk.LabelFrame(dlg, text="Safety copy", padding=(8, 4))
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        ttk.Label(frame, foreground="gray", justify="left",
+                  text=("Reads the whole disk first and checks it (about 1 minute).\n"
+                        "Nothing is changed if the check finds a problem.") if enabled else
+                       "The disk is empty: nothing to copy.").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        var = tk.BooleanVar(value=enabled)
+        cb = ttk.Checkbutton(frame, text="Keep the image afterwards", variable=var,
+                             command=lambda: _toggle())
+        cb.grid(row=1, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="Path:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        path_var = tk.StringVar(value=default)
+        entry = ttk.Entry(frame, textvariable=path_var, width=34)
+        entry.grid(row=2, column=1, sticky="ew", padx=4)
+
+        def _toggle():
+            entry.configure(state="normal" if var.get() else "disabled")
+        if not enabled:
+            cb.configure(state="disabled")
+        _toggle()
+        return lambda: (var.get(), path_var.get().strip() or default)
+
+    def _rewrite_disk(self, verb, snap, write_order, fb_files, keep_image, image_path):
+        """Shared engine of Sort and FB-ify: scratch the disk and write it back.
+
+        Steps: 1 check the disk (tracks 18 and 36), 2 read the whole disk to an image
+        (40 tracks when track 36 is formatted) and analyse it, 3 read every file,
+        4 scratch and write FB files + write_order. Nothing is changed unless 1–3 all pass,
+        so an unsuitable disk (double-sided, files beyond track 35, read errors in files,
+        unsupported file types, or a disk swapped since the listing) is refused untouched.
+        If step 4 fails or is cancelled, the read files are moved to a rescue folder next
+        to the image, and the image is kept even if keep_image is off."""
+        set_msg, close, cancel_event, proc_store = self._make_task_dialog(
+            f"{verb} disk…", "Starting…")
+        self._set_status(f"{verb} disk…")
+        steps = 4 if snap else 1
+
+        def _push_dir():
+            raw = cbm_dir(DRIVE)
+            self.after(0, lambda r=raw: self.cbm_pane._apply_dir(r))
+
+        def run():
+            outcome = {"abort": None, "errors": [], "rescue": None, "image": None,
+                       "touched": False}
+            tmpdir = tempfile.mkdtemp(prefix="diskmasher-")
+            part   = None
+            local_copy = {}     # index in snap → local file read in step 3
+
+            def done():
+                close()
+                o = outcome
+                saved = f"\n\nDisk image: {o['image']}" if o["image"] else ""
+                if o["rescue"]:
+                    messagebox.showerror(f"{verb} incomplete",
+                        f"{verb} stopped after the disk was scratched.\n\n"
+                        + ("\n".join(o["errors"]) + "\n\n" if o["errors"] else "")
+                        + f"The files read from the disk are in:\n{o['rescue']}" + saved)
+                    self._set_status(f"{verb} incomplete — files saved in rescue folder.")
+                elif o["abort"]:
+                    messagebox.showerror(f"{verb} not done", o["abort"] + saved)
+                    self._set_status(f"{verb} not done — disk unchanged.")
+                elif cancel_event.is_set():
+                    self._set_status(f"{verb} cancelled — disk unchanged.")
+                elif o["errors"]:
+                    messagebox.showerror(f"{verb} errors", "\n".join(o["errors"]) + saved)
+                    self._set_status(f"{verb} completed with errors.")
+                else:
+                    self._set_status(f"{verb} complete." +
+                                     (f" Image saved: {o['image']}" if o["image"] else ""))
+                if o["image"] or o["rescue"]:
+                    self.fs_pane._load()
+                if not cancel_event.is_set():
+                    self.cbm_pane.refresh()
+
+            try:
+                if snap:
+                    # --- Step 1: quick check ---
+                    set_msg("Reading tracks 18 and 36…", detail=f"Step 1 of {steps} · Checking the disk")
+                    pr = probe_disk(proc_store, cancel_event)
+                    if cancel_event.is_set():
+                        return
+                    if pr["error"]:
+                        outcome["abort"] = f"Could not check the disk: {pr['error']}.\n\nDisk unchanged."
+                        return
+                    if pr["double_sided"]:
+                        outcome["abort"] = ("This is a double-sided (1571) disk. "
+                                            f"{verb} only handles single-sided disks so far.\n\nDisk unchanged.")
+                        return
+                    # If track 36 couldn't be checked, 35 tracks is still safe here: Sort/FB-ify
+                    # never write beyond 35, and a file reaching track 36 shows up in the
+                    # analysis as a chain pointing outside the image.
+                    tracks = 40 if pr["t36_readable"] else 35
+
+                    # --- Step 2: whole-disk read + analysis ---
+                    part = (image_path + ".part") if keep_image else os.path.join(tmpdir, "disk.d64")
+                    det2 = f"Step 2 of {steps} · Reading the whole disk ({tracks} tracks)"
+                    set_msg("Starting…", detail=det2)
+                    err = read_disk_to_file(part, tracks,
+                        lambda t, f: set_msg(f"Track {t} of {tracks}", fraction=f, detail=det2),
+                        proc_store, cancel_event)
+                    if cancel_event.is_set():
+                        return
+                    if err:
+                        outcome["abort"] = f"Reading the disk failed ({err}).\n\nDisk unchanged."
+                        return
+                    info = analyze_image(open(part, "rb").read())
+                    if keep_image:
+                        if os.path.exists(image_path):
+                            outcome["abort"] = f"{os.path.basename(image_path)} already exists.\n\nDisk unchanged."
+                            return
+                        os.rename(part, image_path)
+                        part = None
+                        outcome["image"] = image_path
+                    names_img  = [f["name"].upper() for f in info["files"]]
+                    names_pane = [n.upper() for _, n, _ in snap]
+                    if len(names_img) != len(names_pane) or any(
+                            a != b for a, b in zip(names_img, names_pane) if a.isascii() and b.isascii()):
+                        outcome["abort"] = ("The disk doesn't match the directory shown "
+                                            "(was it swapped?). Refresh and try again.\n\nDisk unchanged.")
+                        return
+                    if info["problems"]:
+                        outcome["abort"] = (f"{verb} would lose data on this disk:\n\n• "
+                                            + "\n• ".join(info["problems"]) + "\n\nDisk unchanged.")
+                        return
+
+                    # --- Step 3: read every file ---
+                    # Each file goes to its own subfolder first, then becomes
+                    # "NNN-<name>" (NNN = directory position), so two entries with the same
+                    # name can't overwrite each other and the rescue folder keeps the order.
+                    det3 = f"Step 3 of {steps} · Reading files"
+                    for i, (blk, name, ftype) in enumerate(snap, 1):
+                        if cancel_event.is_set():
+                            return
+                        set_msg(f"[{i}/{len(snap)}]  {name}", fraction=(i - 1) / len(snap), detail=det3)
+                        sub = tempfile.mkdtemp(dir=tmpdir)
+                        err = cbm_read_file(DRIVE, name, sub, proc_store)
+                        got = os.listdir(sub)
+                        if not err and len(got) != 1:
+                            err = f"expected one file, got {len(got)}"
+                        if err:
+                            outcome["abort"] = f"Reading {name} failed:\n{err}\n\nDisk unchanged."
+                            return
+                        local_copy[i - 1] = os.path.join(tmpdir, f"{i:03d}-{got[0]}")
+                        os.rename(os.path.join(sub, got[0]), local_copy[i - 1])
+                        os.rmdir(sub)
+                    if cancel_event.is_set():
+                        return
+
+                    # --- Step 4: scratch ---
+                    det4 = f"Step 4 of {steps} · Rewriting the disk"
+                    set_msg("Scratching all files…", detail=det4)
+                    outcome["touched"] = True
+                    _run_bounded(["cbmctrl", "command", DRIVE, "S:*"], 30)
+                    # Wait for the drive to finish before any other bus request, then
+                    # check it scratched every file ("01, FILES SCRATCHED,nn") and that a
+                    # real directory listing (not an error) shows none left.
+                    code, st = drive_status()
+                    m = re.match(r'\s*01\s*,[^,]*,\s*(\d+)', st)
+                    if code != 1 or not m or int(m.group(1)) != len(snap):
+                        outcome["errors"].append(
+                            f"Scratch didn't remove all {len(snap)} files (drive status: {st}). "
+                            "Nothing was written.")
+                        return
+                    raw = cbm_dir(DRIVE)
+                    _, _, left, free = parse_cbm_dir(raw)
+                    if raw.startswith("Error") or free is None or left:
+                        outcome["errors"].append(
+                            f"After the scratch the directory shows {len(left)} file(s) "
+                            f"or couldn't be read ({raw.splitlines()[-1] if raw else 'empty'}). "
+                            "Nothing was written.")
+                        return
+                else:
+                    det4 = f"Step 1 of 1 · Writing"
+
+                # --- Step 4 (cont.): write FB files and the files back ---
+                jobs = [(n.lower(), p) for n, p in fb_files]
+                for entry in write_order:
+                    # write_order holds the same tuples as snap; `is` keeps duplicates apart.
+                    idx = next(i for i, e in enumerate(snap) if e is entry)
+                    jobs.append((entry[1], local_copy.get(idx, "")))
+                for i, (name, local) in enumerate(jobs, 1):
+                    if cancel_event.is_set():
+                        return
+                    set_msg(f"[{i}/{len(jobs)}]  Writing {name}", fraction=(i - 1) / len(jobs), detail=det4)
+                    if not os.path.exists(local):
+                        outcome["errors"].append(f"{name}: local copy missing")
+                        continue
+                    err = cbm_write_file(DRIVE, local, name, proc_store)
+                    if err:
+                        outcome["errors"].append(f"Write {name}: {err}")
+                    else:
+                        _push_dir()
+            except Exception as e:
+                outcome["errors"].append(f"Unexpected error: {e}")
+            finally:
+                failed_after_scratch = outcome["touched"] and (
+                    outcome["errors"] or cancel_event.is_set())
+                if failed_after_scratch:
+                    base = os.path.splitext(image_path)[0]
+                    rescue, n = base + "_rescue", 2
+                    while os.path.exists(rescue):
+                        rescue, n = f"{base}_rescue-{n}", n + 1
+                    try:
+                        os.makedirs(rescue)
+                        # Drop the "NNN-" order prefix, so writing a rescued file back with
+                        # Write gives it its original name; only a name clash gets "-2".
+                        for f in sorted(os.listdir(tmpdir)):
+                            src = os.path.join(tmpdir, f)
+                            if f == "disk.d64" or not os.path.isfile(src):
+                                continue
+                            stem, ext = os.path.splitext(re.sub(r'^\d{3}-', '', f))
+                            dest, n = os.path.join(rescue, stem + ext), 2
+                            while os.path.exists(dest):
+                                dest, n = os.path.join(rescue, f"{stem}-{n}{ext}"), n + 1
+                            shutil.move(src, dest)
+                        outcome["rescue"] = rescue
+                        if part and os.path.exists(part):   # image not kept: keep it now
+                            dest = image_path
+                            n = 2
+                            while os.path.exists(dest):
+                                dest = f"{base}-{n}.d64"; n += 1
+                            shutil.move(part, dest)
+                            outcome["image"] = dest
+                    except OSError as e:
+                        outcome["errors"].append(f"Could not save rescue copy: {e} (temp: {tmpdir})")
+                        tmpdir = None
+                if part and os.path.exists(part):
+                    try: os.unlink(part)
+                    except OSError: pass
+                if tmpdir:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _sort_disk(self):
         if not self.cbm_pane._entries:
@@ -1580,147 +2364,20 @@ class DiskMasher(tk.Tk):
                        f"PRG files:      {len(prgs)}\n"
                        f"Other (SEQ/USR/REL): {len(other)}").pack(fill="x")
 
-        hdr      = self.cbm_pane._hdr.get()
-        m        = re.search(r'"(.+?)"', hdr)
-        diskname = re.sub(r'[^a-zA-Z0-9_-]', '_', m.group(1).strip() if m else "disk").lower()
-        dest_dir = self.fs_pane.current_dir()
-        default_backup = os.path.join(dest_dir, f"{diskname}_backup.d64")
-
-        backup_frame = ttk.LabelFrame(dlg, text="Backup", padding=(8, 4))
-        backup_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
-        backup_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(backup_frame, text="Backup disk to image first",
-                        variable=backup_var, command=lambda: _toggle_backup()).grid(
-            row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(backup_frame, text="Path:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
-        backup_path_var = tk.StringVar(value=default_backup)
-        backup_entry = ttk.Entry(backup_frame, textvariable=backup_path_var, width=34)
-        backup_entry.grid(row=1, column=1, sticky="ew", padx=4)
-
-        def _toggle_backup():
-            s = "normal" if backup_var.get() else "disabled"
-            backup_entry.configure(state=s)
-        _toggle_backup()
+        get_image = self._add_image_frame(dlg, row=3)
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.grid(row=4, column=0, columnspan=2, pady=(4, 10))
 
         def _do_sort():
-            add_fb      = fb_var.get()
-            platform    = plat_var.get()
-            fb_files    = FB_PATHS[platform] if add_fb else []
-            snap        = entries[:]
-            do_backup   = backup_var.get()
-            backup_path = backup_path_var.get().strip()
+            fb_files = FB_PATHS[plat_var.get()] if fb_var.get() else []
+            snap     = entries[:]
+            keep, path = get_image()
             dlg.destroy()
-
-            prg_entries   = sorted(
-                [(b, n, t) for b, n, t in snap if t.upper().lstrip("*") == "PRG"],
-                key=lambda x: x[1].lower())
-            other_entries = [(b, n, t) for b, n, t in snap if t.upper().lstrip("*") != "PRG"]
-            write_order   = prg_entries + other_entries
-            total = len(snap) * 2 + len(fb_files)
-            step  = [0]
-
-            set_msg, close, cancel_event, proc_store = self._make_task_dialog(
-                "Sorting disk…", "Sorting…")
-            self._set_status("Sorting disk…")
-
-            def _progress(msg):
-                step[0] += 1
-                set_msg(f"[{step[0]}/{total}]  {msg}")
-
-            def _push_dir():
-                raw = cbm_dir(DRIVE)
-                self.after(0, lambda r=raw: self.cbm_pane._apply_dir(r))
-
-            def run():
-                tmpdir = None
-                errors = []
-                try:
-                    if cancel_event.is_set():
-                        return
-                    if do_backup and backup_path:
-                        set_msg(f"Backing up to {os.path.basename(backup_path)}…")
-                        proc = subprocess.Popen(["d64copy", DRIVE, backup_path],
-                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        proc_store[0] = proc
-                        proc.communicate(timeout=300)
-                        proc_store[0] = None
-                        if not os.path.exists(backup_path) or os.path.getsize(backup_path) == 0:
-                            self.after(0, lambda: messagebox.showerror(
-                                "Sort aborted", "Backup failed — disk unchanged."))
-                            return
-                        self.after(0, lambda: self.fs_pane._load())
-
-                    if cancel_event.is_set():
-                        return
-                    tmpdir = tempfile.mkdtemp()
-                    for blk, name, ftype in snap:
-                        if cancel_event.is_set():
-                            break
-                        _progress(f"Reading {name}…")
-                        err = cbm_read_file(DRIVE, name, tmpdir, proc_store)
-                        if err:
-                            errors.append(f"Read {name}: {err}")
-                    if errors and not cancel_event.is_set():
-                        self.after(0, lambda: messagebox.showerror(
-                            "Sort aborted",
-                            "Read failed — disk unchanged:\n" + "\n".join(errors)))
-                        return
-
-                    if not cancel_event.is_set():
-                        set_msg("Scratching files…")
-                        subprocess.run(["cbmctrl", "command", DRIVE, "S:*"],
-                                       capture_output=True, timeout=10)
-
-                    for cbm_name, local_path in fb_files:
-                        if cancel_event.is_set():
-                            break
-                        _progress(f"Writing {cbm_name}…")
-                        err = cbm_write_file(DRIVE, local_path, cbm_name.lower(), proc_store)
-                        if err:
-                            errors.append(f"Write {cbm_name}: {err}")
-                        else:
-                            _push_dir()
-
-                    for blk, name, ftype in write_order:
-                        if cancel_event.is_set():
-                            break
-                        ext = TYPE_EXT.get(ftype.upper().lstrip("*"), ".prg")
-                        local_file = os.path.join(tmpdir, name + ext)
-                        if not os.path.exists(local_file):
-                            for f in os.listdir(tmpdir):
-                                if f.upper().startswith(name.upper() + "."):
-                                    local_file = os.path.join(tmpdir, f)
-                                    break
-                        if os.path.exists(local_file):
-                            _progress(f"Writing {name}…")
-                            err = cbm_write_file(DRIVE, local_file, name, proc_store)
-                            if err:
-                                errors.append(f"Write {name}: {err}")
-                            else:
-                                _push_dir()
-                        else:
-                            errors.append(f"Not found in scratch dir: {name}")
-                finally:
-                    if tmpdir:
-                        try: shutil.rmtree(tmpdir)
-                        except Exception: pass
-
-                def done():
-                    close()
-                    self.cbm_pane.refresh()
-                    if cancel_event.is_set():
-                        self._set_status("Sort cancelled.")
-                    elif errors:
-                        messagebox.showerror("Sort errors", "\n".join(errors))
-                        self._set_status("Sort completed with errors.")
-                    else:
-                        self._set_status("Sort complete.")
-                self.after(0, done)
-
-            threading.Thread(target=run, daemon=True).start()
+            prgs  = sorted([e for e in snap if e[2].upper().lstrip("*").startswith("PRG")],
+                           key=lambda x: x[1].lower())
+            other = [e for e in snap if not e[2].upper().lstrip("*").startswith("PRG")]
+            self._rewrite_disk("Sort", snap, prgs + other, fb_files, keep, path)
 
         ttk.Button(btn_frame, text="Sort", command=_do_sort).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
@@ -1758,8 +2415,12 @@ class DiskMasher(tk.Tk):
         ttk.Label(info_frame, textvariable=verdict_var, font=("Menlo", 10, "bold"),
                   justify="left").pack(anchor="w")
 
+        # FB-ify scratches and rewrites every file, so it reads and checks the disk first;
+        # an empty disk has nothing to lose.
+        get_image = self._add_image_frame(dlg, row=2, enabled=bool(self.cbm_pane._entries))
+
         btn_frame = ttk.Frame(dlg)
-        btn_frame.grid(row=2, column=0, columnspan=2, pady=(4, 10))
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=(4, 10))
         proceed_btn = ttk.Button(btn_frame, text="FB-ify", command=lambda: _do_fbify())
         proceed_btn.pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
@@ -1789,96 +2450,11 @@ class DiskMasher(tk.Tk):
                 proceed_btn.configure(state="disabled")
 
         def _do_fbify():
-            platform = plat_var.get()
-            fb_files = FB_PATHS[platform]
+            fb_files = FB_PATHS[plat_var.get()]
             entries  = self.cbm_pane._entries[:]
+            keep, path = get_image()
             dlg.destroy()
-
-            total = (len(entries) * 2 + len(fb_files)) if entries else len(fb_files)
-            step  = [0]
-            set_msg, close, cancel_event, proc_store = self._make_task_dialog(
-                "FB-ifying disk…", f"FB-ifying for {platform}…")
-            self._set_status(f"FB-ifying for {platform}…")
-
-            def _progress(msg):
-                step[0] += 1
-                set_msg(f"[{step[0]}/{total}]  {msg}")
-
-            def _push_dir():
-                raw = cbm_dir(DRIVE)
-                self.after(0, lambda r=raw: self.cbm_pane._apply_dir(r))
-
-            def run():
-                tmpdir = None
-                errors = []
-                try:
-                    if entries and not cancel_event.is_set():
-                        tmpdir = tempfile.mkdtemp()
-                        for blk, name, ftype in entries:
-                            if cancel_event.is_set():
-                                break
-                            _progress(f"Reading {name}…")
-                            err = cbm_read_file(DRIVE, name, tmpdir, proc_store)
-                            if err:
-                                errors.append(f"Read {name}: {err}")
-                        if errors and not cancel_event.is_set():
-                            self.after(0, lambda: messagebox.showerror(
-                                "FB-ify aborted",
-                                "Read failed — disk unchanged:\n" + "\n".join(errors)))
-                            return
-                        if not cancel_event.is_set():
-                            set_msg("Scratching files…")
-                            subprocess.run(["cbmctrl", "command", DRIVE, "S:*"],
-                                           capture_output=True, timeout=10)
-
-                    for cbm_name, local_path in fb_files:
-                        if cancel_event.is_set():
-                            break
-                        _progress(f"Writing {cbm_name}…")
-                        err = cbm_write_file(DRIVE, local_path, cbm_name.lower(), proc_store)
-                        if err:
-                            errors.append(f"Write {cbm_name}: {err}")
-                        else:
-                            _push_dir()
-
-                    if tmpdir:
-                        for blk, name, ftype in entries:
-                            if cancel_event.is_set():
-                                break
-                            ext = TYPE_EXT.get(ftype.upper().lstrip("*"), ".prg")
-                            local_file = os.path.join(tmpdir, name + ext)
-                            if not os.path.exists(local_file):
-                                for f in os.listdir(tmpdir):
-                                    if f.upper().startswith(name.upper() + "."):
-                                        local_file = os.path.join(tmpdir, f)
-                                        break
-                            if os.path.exists(local_file):
-                                _progress(f"Restoring {name}…")
-                                err = cbm_write_file(DRIVE, local_file, name, proc_store)
-                                if err:
-                                    errors.append(f"Restore {name}: {err}")
-                                else:
-                                    _push_dir()
-                            else:
-                                errors.append(f"Not found in scratch dir: {name}")
-                finally:
-                    if tmpdir:
-                        try: shutil.rmtree(tmpdir)
-                        except Exception: pass
-
-                def done():
-                    close()
-                    self.cbm_pane.refresh()
-                    if cancel_event.is_set():
-                        self._set_status("FB-ify cancelled.")
-                    elif errors:
-                        messagebox.showerror("FB-ify errors", "\n".join(errors))
-                        self._set_status("FB-ify completed with errors.")
-                    else:
-                        self._set_status(f"FB-ify complete ({platform}).")
-                self.after(0, done)
-
-            threading.Thread(target=run, daemon=True).start()
+            self._rewrite_disk("FB-ify", entries, entries, fb_files, keep and bool(entries), path)
 
         _update_info()
         dlg.wait_window()

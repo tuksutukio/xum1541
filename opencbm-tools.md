@@ -36,6 +36,39 @@ Key options:
 - Writing 40-track images to disks **pre-formatted to 40 tracks** with `cbmforng -x` works perfectly
 - **Unconfirmed:** whether writing a 40-track image to a genuinely virgin/unformatted disk works
 - **Rule: for 40-track images, always `cbmforng -x` before `d64copy` unless the disk is known to already be 40-track formatted**
+- Reading to an image creates the file **at full size before reading**: a read stopped at 10% left 174848 bytes, so
+  the file size never proves a complete read. A complete read exits 0 and ends with `683 blocks copied.` (1571 drive,
+  35-track disk, 48 s; 2026-11-25)
+- Exits on SIGTERM (code 143) within a second, mid-read; the bus was fine afterwards (reset + `detect` OK)
+- While it runs it holds the xum1541: any other opencbm command fails at once with `LIBUSB_ERROR_ACCESS`
+- `-s T -e T` reads a single track in about 3 s (1571), writing a full-size image with only that track filled; with
+  `-e 40` the image is 40-track size even if only track 36 was read
+- A track beyond 35 can hold **leftover data** from an earlier 40-track use: a disk formatted to 35 tracks later
+  doesn't touch tracks 36–40, so they still read cleanly (seen on a spare disk, 2026-11-25). A readable track 36
+  doesn't mean any file uses it, but a 35-track image silently drops that data.
+
+- **Reset before every `d64copy`.** Right after a `cbmread` or `cbmwrite`, the next `d64copy` can stall: a track-36
+  read hung every time (only the first attempt; a second one worked), and a full 40-track read stalled at track 31
+  and, when stopped, left the 1571 unresponsive until a power cycle. `cbmctrl reset` + 2 s first fixed both, every
+  time (2026-11-25, 1571). `cbmctrl dir` and a scratch don't cause it. diskmasher does this in `reset_and_settle()`.
+
+**Disk facts seen with these tools (2026-11-25, 1571 in 1541 mode):**
+- `cbmforng -x` formats 40 tracks and writes a SpeedDOS-style extended BAM at `$C0–$D3` of 18/0 (tracks 36–40,
+  4 bytes each: free count + bitmap); the drive's DOS still reports **664 blocks free**, so a directory listing
+  never reveals a 40-track disk.
+- Standard DOS refuses a file whose chain reaches track 36: `67,ILLEGAL TRACK OR SECTOR,36,00`.
+- **`cbmread` exits 0 on a failed read** and only prints `[Warning] file copy ended with error status: …` and
+  `[Warning] error reading NAME`, without creating the file. Treat any `[Warning]`/`[Fatal]` line as failure.
+  `cbmwrite` prints `[Fatal] could not open file for writing: 63, FILE EXISTS` for a duplicate name.
+  Not every `[Warning]` is a failure: `could not identify drive, using no turbo` (right after a drive power cycle)
+  still transfers the file.
+- Right after a drive power cycle, the first `cbmctrl detect` returned no drive at all; a later one found it.
+- **`cbmctrl command` returns as soon as the command is sent**; the drive works on afterwards (`V0`: command
+  returned in 0.1 s, the following `cbmctrl status` waited 2.7 s). Read the status before the next bus request,
+  and check it: `S:*` answers `01, FILES SCRATCHED,nn`. A Sort that listed the directory straight after `S:*`
+  later wrote into files that were never scratched (2026-11-25; most likely this race, not proven).
+- `V0` (validate) removed a splat file left by an interrupted `cbmwrite` and returned its 20 allocated blocks;
+  the directory had listed it as 0 blocks. Don't scratch splat files; validate instead.
 
 **Image size detection:**
 - Standard 35-track d64: 174,848 bytes (683 blocks × 256)

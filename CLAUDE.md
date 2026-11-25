@@ -1,7 +1,53 @@
-# CLAUDE.md — diskmasher (xum1541)
+# CLAUDE.md
 
-User docs, features and backlog: README.md. Tool notes: opencbm-tools.md.
-The two sections below moved here on 2026-10-15 from Claude's per-project memory, so they're versioned.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Diskmasher (repo folder `xum1541`): a Tkinter GUI for writing and reading real CBM floppies through an xum1541 USB
+adapter. User docs, features and backlog: README.md. opencbm command-line behaviour, including tested quirks
+(40-track rules, `d64copy` options): opencbm-tools.md; check it before changing how a tool is invoked.
+The "UI layout" and "lockup" sections moved here on 2026-10-15 from Claude's per-project memory, so they're versioned.
+
+## Running
+
+- `./diskmasher.py` (shebang `/opt/homebrew/bin/python3.13`; stdlib only, no venv or requirements file).
+- No tests, linter or build step. Verifying a change means running the app against real hardware (xum1541 + drive 8),
+  so IEC operations can't be checked from a session alone: say what's untested and ask Antti to try it.
+- External tools: opencbm via Homebrew (`cbmctrl`, `cbmwrite`, `cbmread`, `d64copy`, `cbmforng`, `cbmformat`); VICE's
+  `c1541` found at `/Applications/VICE*/bin/c1541` (image features are disabled when it's missing).
+- State outside the repo: prefs (geometry, sash, checkbox defaults) in `~/.config/diskmasher/prefs.ini`; single-instance
+  PID file `~/.diskmasher.pid`. The left pane starts at `/Volumes/ULTI` (Antti's collection drive) if mounted, else `~`.
+
+## Architecture
+
+Everything is in `diskmasher.py`; `fb/` holds the File Browser boot binaries that "FB-ify disk" and "Sort disk" write
+to disk (`FB_PATHS` maps platform → files).
+
+- **Classes:** `FilesystemPane` (left: local navigation, image create/browse via `c1541`), `CbmDirPane` (right: parses
+  `cbmctrl dir` output), `DiskMasher` (the `tk.Tk` window; menus and every drive operation as a `_verb_noun` method).
+- **Threading rule:** all opencbm/`c1541` calls run in `threading.Thread(daemon=True)`; UI updates go back to the Tk
+  thread only via `self.after(0, …)`. Keep that pattern; Tk isn't thread-safe.
+- **Two progress UIs, one Cancel sequence.** Both return a `proc_store` (`[None]`, the running Popen in slot 0) and
+  a `cancel_event`, and both cancel through `_cancel_and_recover`:
+  - `_make_task_dialog`: small modal, used for per-file operations (read, write, scratch, sort, FB-ify,
+    read-to-image).
+  - `_make_progress_window`: resizable log window for streaming tools (format, write image, read disk to image), fed by
+    `_pty_run`, which runs the tool under a pty so opencbm prints its progress live.
+- **After a cancel the bus belongs to `_cancel_and_recover`** until it finishes; it refreshes the right pane itself.
+  Workers must check `cancel_event` and skip any further `cbmctrl`/`cbm_dir` call, including the final refresh.
+- **Never `subprocess.run(timeout=…)` for opencbm tools:** on timeout it SIGKILLs. Use `_run_bounded` (short
+  commands) or `_stop_proc` (SIGTERM, 3 s grace, SIGKILL only if still alive).
+- **`reset_and_settle()` before every `d64copy`** (a `d64copy` right after `cbmread`/`cbmwrite` can stall; see
+  opencbm-tools.md). Judge `cbmread`/`cbmwrite` success with `_opencbm_error`, never by exit code alone.
+- **Disk checking, no drive access:** `analyze_image()` walks the directory and every file's sector chain in an
+  image (files beyond track 35, read errors inside files, unsupported types, data on 36–40 outside files,
+  double-sided flag); `describe_image()` turns that into text.
+- **Disk checking, on the drive:** `probe_disk()` reads tracks 18 and 36 (about 6 s) to learn the shape of the disk
+  before a full read; `read_disk_to_file()` is the full read with progress, judged complete only by `d64copy`'s
+  "N blocks copied." (it creates the file at full size up front).
+- **Sort and FB-ify share `_rewrite_disk`:** check, full read + analysis, read every file, and only then scratch
+  and rewrite. Anything risky stops it before the disk is touched; a failure after the scratch moves the read
+  files to a `*_rescue` folder next to the image and keeps the image.
+- One drive only: `DRIVE = "8"` is a module constant used throughout.
 
 ## UI layout
 
@@ -18,11 +64,14 @@ The two sections below moved here on 2026-10-15 from Claude's per-project memory
   commands. Recovery needed a physical USB replug.
 - **Correlation:** lockups came with cancelling during a *failing* operation (`d64copy` stuck on a bad sector,
   xum1541 mid-IEC-transaction, SIGKILL cutting it dead).
-- **Cancel-sequence ideas (before IOKit):** `cbmctrl reset` *before* killing the process; SIGTERM and wait 2–3 s
-  (1 s may be too short); SIGKILL only as a last resort.
-- **Health check, implemented:** after cancel, probe `cbmctrl detect` (a real bus operation) every 1 s for up to
-  10 s; "Cancelled — bus OK." in the status bar if it responds, otherwise a modal error. `cbmctrl status` was tried
-  first and proved insufficient: it succeeded while the bus still wasn't usable.
+- **Cancel sequence (`_cancel_and_recover`, unified 2026-11-25):** SIGTERM, wait up to 3 s, SIGKILL only if still
+  alive; `cbmctrl reset`; 2 s settle (drives re-initialise after a reset); one `cbmctrl detect` with a 5 s limit.
+  Three outcomes: drives listed → "bus OK (8: 1571)" and refresh; detect hangs → "replug USB" error; detect
+  returns but lists no drive → "check drive power and IEC cable". `cbmctrl status` was tried as the probe first and
+  proved insufficient: it succeeded while the bus still wasn't usable.
+- **`cbmctrl reset` *before* killing the process is impossible** (tested 2026-11-25, 1571): while `d64copy` holds the
+  xum1541, a second opencbm process fails at once with `LIBUSB_ERROR_ACCESS`, and the transfer carries on unaffected.
+  `d64copy` exits on SIGTERM (143) within a second, and reset + `detect` worked straight after.
 - **Resilience observed 2026-06-30:** survived a drive power cycle and an IEC cable unplug/replug during an active
   read, without a relaunch. No true firmware lockup was reproduced; early incidents may have been timing-specific.
 
@@ -33,6 +82,16 @@ The two sections below moved here on 2026-10-15 from Claude's per-project memory
 | Cancel with IEC cable unplugged | Bus OK after IEC replug + settle | ✓ |
 | Cancel with drive powered off | Bus OK | ✓ |
 | SIGKILL `d64copy` from terminal (no graceful shutdown) | Most likely to trigger stuck state | ✗ |
+
+- **Stuck with no cancel, 2026-11-24 (1571 on device 8):** on first use after weeks idle, `cbmctrl detect` and
+  `cbmctrl status 8`–`11` hung (normally `detect` answers in about a second), while the xum1541 enumerated on USB
+  and `cbmctrl reset` returned at once and reached the drive (motor spin). A USB replug (through a USB-A to USB-C
+  adapter) together with a drive power cycle fixed it; we don't know which one did. Next time, replug USB alone
+  first. Probe commands always with a timeout: a hung `cbmctrl` never returns by itself.
+- **Stall after a file transfer, 2026-11-25 (1571):** a 40-track `d64copy` read started right after `cbmread`
+  stalled at track 31; stopping it (SIGTERM after 120 s) left the drive unresponsive: the xum1541 answered at once,
+  `detect` found no drive. A drive power cycle alone (no USB replug) fixed it, so the drive was the stuck part.
+  Prevented since by `reset_and_settle()` before every `d64copy`.
 
 - **Next if it recurs:** try the SIGKILL-from-terminal case first. Real fix: a programmatic USB device reset via
   macOS IOKit, or check whether `xum1541cfg` has a reset command. Not yet investigated.
