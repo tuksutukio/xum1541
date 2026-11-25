@@ -79,7 +79,6 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 - `.d71`/`.d81` full support throughout (browse, read-to-image, create)
 
 ### Infrastructure
-- One IEC operation at a time — a busy flag or lock shared by everything that touches the drive (write, read, format, FB-ify, sort, scratch, refresh, detect), so two worker threads can never drive the bus at once; plus a visible busy indicator for operations that have no progress window (scratch, refresh, read files)
 - Startup dependency check for opencbm tools (`cbmctrl`, `d64copy`, `cbmwrite`, `cbmread`) with clear install instructions if missing
 - xum1541 USB reset via macOS IOKit — programmatic recovery from firmware lockup without physically replugging the USB cable
 - Write verify — read back after each `cbmwrite` to catch flaky sectors

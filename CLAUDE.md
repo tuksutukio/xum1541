@@ -10,6 +10,9 @@ The "UI layout" and "lockup" sections moved here on 2026-10-15 from Claude's per
 ## Running
 
 - `./diskmasher.py` (shebang `/opt/homebrew/bin/python3.13`; stdlib only, no venv or requirements file).
+- **Restarting it for Antti after a code change** (he asked, 2026-11-25): only when no drive operation runs (the
+  log's last line is a finished command); `kill -TERM $(cat ~/.diskmasher.pid)` (that exact PID, never by name), then
+  `nohup ./diskmasher.py >/dev/null 2>&1 & disown` from the repo; check the new PID in `~/.diskmasher.pid`.
 - Offline tests (stdlib `unittest`, no hardware, ~40 s): `/opt/homebrew/bin/python3.13 -B -m unittest discover -s tests`
   (one file: add `-p test_tools.py`). Run them after every change. `tests/_common.py` builds `.d64` images
   (`make_d64`) and puts fake opencbm tools (`tests/fake_opencbm.py`, with a simulated drive memory and job queue) on
@@ -40,6 +43,12 @@ to disk (`FB_PATHS` maps platform → files).
     read-to-image).
   - `_make_progress_window`: resizable log window for streaming tools (format, write image, read disk to image), fed by
     `_pty_run`, which runs the tool under a pty so opencbm prints its progress live.
+- **One drive operation at a time:** every worker that touches the bus starts with `self._start_op(label, fn)`
+  (from the Tk thread), never a bare `threading.Thread`. It counts running operations; while any runs, the drive
+  menus and Write → are disabled, the dot at the right of the status bar flashes red (green when idle, grey when the last detect found no drive), the menu events (wrapped in
+  `_when_free`) are refused, and `cbm_pane.refresh()` only sets `_refresh_pending`, run when the count is back to 0.
+  Operations started during one (Cancel's recovery, a follow-up reset) count as part of it. `c1541` threads stay
+  plain threads. Tested in `tests/test_busy.py`.
 - **After a cancel the bus belongs to `_cancel_and_recover`** until it finishes; it refreshes the right pane itself.
   Workers must check `cancel_event` and skip any further `cbmctrl`/`cbm_dir` call, including the final refresh.
 - **Never `subprocess.run(timeout=…)` for opencbm tools:** on timeout it SIGKILLs. Use `_run_bounded` (short

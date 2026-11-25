@@ -43,7 +43,11 @@ The window has two panes side by side.
   - Above the list: the drive number, the disk name and ID, and the menus **← Read**, **Drive**, **Disk** and
     **File**.
   - Below the list: file count and blocks free, and the size of the selection.
-- **Status bar** (bottom): what the last operation did.
+- **Status bar** (bottom): what the last operation did. The dot at its right end is green while the drive is
+  idle, flashes red while it's working, and is grey when no drive answered the last scan (Detect, or the bus check
+  after a Cancel). While it's red, the drive menus and **Write →** are greyed out: only
+  one drive operation runs at a time. They come back when it's finished, including the directory refresh that
+  follows.
 
 Selecting: click selects one item, ⌘-click adds or removes items. Click an empty area below the list to clear the
 selection. The divider between the panes can be dragged; window size and divider position are remembered.

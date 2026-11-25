@@ -1067,7 +1067,8 @@ class FilesystemPane(ttk.Frame):
         file_btn["menu"] = file_menu
         file_btn.pack(side="left", padx=4, pady=2)
         ttk.Button(nav, text="Refresh", command=self._load).pack(side="left", padx=2, pady=2)
-        ttk.Button(nav, text="Write →", command=lambda: self.event_generate("<<WriteRequest>>")).pack(side="right", padx=4, pady=2)
+        self._write_btn = ttk.Button(nav, text="Write →", command=lambda: self.event_generate("<<WriteRequest>>"))
+        self._write_btn.pack(side="right", padx=4, pady=2)
 
         frame = ttk.Frame(self)
         frame.pack(fill="both", expand=True)
@@ -1505,6 +1506,7 @@ class CbmDirPane(ttk.Frame):
                               command=lambda: self.event_generate("<<MakeFirstRequest>>"))
         file_btn["menu"] = file_menu
         file_btn.pack(side="right", padx=2, pady=2)
+        self._menubuttons = [read_btn, drive_btn, disk_btn, file_btn]
 
         frame = ttk.Frame(self)
         frame.pack(fill="both", expand=True)
@@ -1563,6 +1565,10 @@ class CbmDirPane(ttk.Frame):
         self._sel_status.set("")
 
     def refresh(self):
+        app = self.winfo_toplevel()
+        if app._ops:                    # the bus is busy: refresh when it's free
+            app._refresh_pending = True
+            return
         self._hdr.set(f"{DRIVE}:  refreshing…")
         self.lb.delete(0, tk.END)
         self._status.set("")
@@ -1572,7 +1578,7 @@ class CbmDirPane(ttk.Frame):
             raw = cbm_dir(DRIVE)
             self.after(0, lambda: self._apply_dir(raw))
 
-        threading.Thread(target=_run, daemon=True).start()
+        app._start_op("Refreshing", _run)
 
     def _update_sel_status(self):
         sel = self.lb.curselection()
@@ -1599,6 +1605,12 @@ class DiskMasher(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Diskmasher")
+        # One drive operation at a time: _start_op counts running operations; while any
+        # runs, the drive menus and Write are disabled and a refresh waits for the end.
+        self._ops = 0
+        self._op_label = ""
+        self._have_drives = False       # set by detect and Cancel's bus check
+        self._refresh_pending = False
         self.geometry("1100x660+120+80")
         self.minsize(750, 420)
         self._build_toolbar()
@@ -1660,21 +1672,21 @@ class DiskMasher(tk.Tk):
         self.cbm_pane = CbmDirPane(paned)
         paned.add(self.fs_pane,  weight=1)
         paned.add(self.cbm_pane, weight=0)
-        self.fs_pane.bind("<<WriteRequest>>",        lambda e: self._write_to_cbm())
+        self.fs_pane.bind("<<WriteRequest>>",        self._when_free(self._write_to_cbm))
         self.fs_pane.bind("<<SelectionChanged>>",    lambda e: self._update_read_to_image_state())
-        self.cbm_pane.bind("<<DetectRequest>>",  lambda e: self._detect_drives())
+        self.cbm_pane.bind("<<DetectRequest>>",  self._when_free(self._detect_drives))
         self.cbm_pane.bind("<<DriveSelected>>",
                            lambda e: self._select_drive(self.cbm_pane.drive_var.get()))
-        self.cbm_pane.bind("<<RefreshRequest>>", lambda e: self._refresh_cbm())
-        self.cbm_pane.bind("<<ReadRequest>>",   lambda e: self._read_from_cbm())
-        self.cbm_pane.bind("<<FormatRequest>>", lambda e: self._format_disk())
-        self.cbm_pane.bind("<<FBifyRequest>>",    lambda e: self._fbify_disk())
-        self.cbm_pane.bind("<<SortRequest>>",     lambda e: self._sort_disk())
-        self.cbm_pane.bind("<<EraseRequest>>",    lambda e: self._erase_disk())
-        self.cbm_pane.bind("<<ReadImageRequest>>",   lambda e: self._read_image_from_cbm())
-        self.cbm_pane.bind("<<ReadToImageRequest>>", lambda e: self._read_to_image())
-        self.cbm_pane.bind("<<ScratchRequest>>",     lambda e: self._scratch_files())
-        self.cbm_pane.bind("<<MakeFirstRequest>>",   lambda e: self._make_first())
+        self.cbm_pane.bind("<<RefreshRequest>>", self._when_free(self._refresh_cbm))
+        self.cbm_pane.bind("<<ReadRequest>>",   self._when_free(self._read_from_cbm))
+        self.cbm_pane.bind("<<FormatRequest>>", self._when_free(self._format_disk))
+        self.cbm_pane.bind("<<FBifyRequest>>",    self._when_free(self._fbify_disk))
+        self.cbm_pane.bind("<<SortRequest>>",     self._when_free(self._sort_disk))
+        self.cbm_pane.bind("<<EraseRequest>>",    self._when_free(self._erase_disk))
+        self.cbm_pane.bind("<<ReadImageRequest>>",   self._when_free(self._read_image_from_cbm))
+        self.cbm_pane.bind("<<ReadToImageRequest>>", self._when_free(self._read_to_image))
+        self.cbm_pane.bind("<<ScratchRequest>>",     self._when_free(self._scratch_files))
+        self.cbm_pane.bind("<<MakeFirstRequest>>",   self._when_free(self._make_first))
 
     def _update_read_to_image_state(self):
         if not _C1541:
@@ -1687,9 +1699,89 @@ class DiskMasher(tk.Tk):
         self.cbm_pane._read_menu.entryconfigure(2, state="normal" if enabled else "disabled")
 
     def _build_statusbar(self):
+        # Flat, with a separator line above (sunken borders glared in dark mode), and the
+        # right end padded so the dot clears the window's rounded corner.
+        bar = ttk.Frame(self, padding=(6, 2, 14, 5))
+        bar.pack(fill="x", side="bottom")
+        ttk.Separator(self, orient="horizontal").pack(fill="x", side="bottom")
+        self._build_busy_indicator(bar).pack(side="right")
         self._sv = tk.StringVar(value="Ready.  |  Multi-select: shift-click or cmd-click")
-        ttk.Label(self, textvariable=self._sv, anchor="w",
-                  padding=(6, 3), relief="sunken").pack(fill="x", side="bottom")
+        ttk.Label(bar, textvariable=self._sv, anchor="w").pack(fill="x", side="left", expand=True)
+
+    IDLE_GREEN, BUSY_RED, NO_DRIVE_GREY = "#27ae60", "#d62c1a", "#9a9a9a"
+
+    def _build_busy_indicator(self, parent):
+        """A dot at the right of the status bar: flashing red while a drive operation runs
+        (_show_busy), green when idle, grey when the last detect (or Cancel's bus check)
+        found no drive. The status text says what's running."""
+        box = ttk.Frame(parent)
+        bg = ttk.Style().lookup("TFrame", "background") or "systemWindowBackgroundColor"
+        self._busy_dot = tk.Canvas(box, width=12, height=12, highlightthickness=0, bg=bg)
+        self._busy_oval = self._busy_dot.create_oval(1, 1, 11, 11, fill=self.NO_DRIVE_GREY,
+                                                     outline="")
+        self._busy_dot.pack(side="left")
+        self._busy_blink = None
+        return box
+
+    def _blink(self):
+        on = self._busy_dot.itemcget(self._busy_oval, "state") == "hidden"
+        self._busy_dot.itemconfigure(self._busy_oval, state="normal" if on else "hidden")
+        self._busy_blink = self.after(500, self._blink)
+
+    def _start_op(self, label, target):
+        """Run `target` in a worker thread as a drive operation. Call from the Tk thread.
+        Operations started while one runs (a refresh at its end, Cancel's recovery) count
+        as part of it; the bus is free again when the count is back to 0."""
+        self._ops += 1
+        if self._ops == 1:
+            self._op_label = label
+            self._show_busy(True)
+
+        def wrapper():
+            try:
+                target()
+            finally:
+                self.after(0, self._end_op)
+        threading.Thread(target=wrapper, daemon=True).start()
+
+    def _end_op(self):
+        self._ops -= 1
+        if self._ops == 0:
+            self._show_busy(False)
+            if self._refresh_pending:
+                self._refresh_pending = False
+                self.cbm_pane.refresh()
+
+    def _show_busy(self, busy):
+        state = "disabled" if busy else "normal"
+        for b in self.cbm_pane._menubuttons + [self.fs_pane._write_btn]:
+            b.configure(state=state)
+        if self._busy_blink:
+            self.after_cancel(self._busy_blink)
+            self._busy_blink = None
+        self._busy_dot.itemconfigure(self._busy_oval, state="normal",
+                                     fill=self.BUSY_RED if busy else
+                                     self.IDLE_GREEN if self._have_drives else self.NO_DRIVE_GREY)
+        if busy:
+            self._blink()
+
+    def _when_free(self, fn):
+        """For the menu events: run fn only while no drive operation runs, after closing
+        the finished progress windows of earlier operations."""
+        def handler(_e=None):
+            if self._ops:
+                self.bell()
+                self._set_status(f"Drive busy ({self._op_label}): try again when it has finished.")
+                return
+            self._close_stale()
+            fn()
+        return handler
+
+    def _close_stale(self):
+        """Close progress windows whose operation has finished (marked by their _finish)."""
+        for w in self.winfo_children():
+            if isinstance(w, tk.Toplevel) and getattr(w, "_stale", False):
+                w.destroy()
 
     def _set_status(self, msg):
         self._sv.set(msg)
@@ -1840,6 +1932,7 @@ class DiskMasher(tk.Tk):
             r = _run_bounded(["cbmctrl", "detect"], 5)
             drives = (re.findall(r'^\s*(\d+):\s*(\S+)', r[1], re.M)
                       if r is not None and r[0] == 0 else [])
+            self._have_drives = bool(drives)        # the dot turns grey without drives
             if drives:
                 found = ", ".join(f"{dev}: {model}" for dev, model in drives)
                 def _ok():
@@ -1860,7 +1953,7 @@ class DiskMasher(tk.Tk):
                         "The xum1541 responds, but no drive answered the scan.\n\n"
                         "Check the drive's power and the IEC cable.")))
 
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_op('Recovering the bus', _run)
 
     def _detect_drives(self, on_done=None):
         self._set_status("Detecting drives…")
@@ -1871,6 +1964,7 @@ class DiskMasher(tk.Tk):
                 close()
                 drives = parse_detect(result) if not result.startswith("Error:") else []
                 self.cbm_pane.set_drives(drives)
+                self._have_drives = bool(drives)
                 if not result:
                     self._set_status("No drives detected.")
                 elif result.startswith("Error:"):
@@ -1886,7 +1980,7 @@ class DiskMasher(tk.Tk):
                 if on_done:
                     on_done()
             self.after(0, _done)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_op('Detecting drives', _run)
 
     def _select_drive(self, unit, refresh=True):
         """Make `unit` the drive every operation uses. Refused while an operation window is
@@ -1895,8 +1989,8 @@ class DiskMasher(tk.Tk):
         unit = str(unit)
         if unit == DRIVE:
             return True
-        busy = [w for w in self.winfo_children()
-                if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+        busy = self._ops or [w for w in self.winfo_children()
+                             if isinstance(w, tk.Toplevel) and w.winfo_exists()]
         if busy:
             self.cbm_pane.drive_var.set(DRIVE)
             messagebox.showinfo("Drive in use",
@@ -1929,7 +2023,7 @@ class DiskMasher(tk.Tk):
                 self.cbm_pane._apply_dir(raw)
                 self._set_status("Refreshed.")
             self.after(0, _done)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_op('Refreshing', _run)
 
     def _make_first(self):
         """File → Make first (LOAD"*"): move the selected file to the first directory slot.
@@ -1978,7 +2072,7 @@ class DiskMasher(tk.Tk):
                 self.cbm_pane.refresh()
             self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op('Make first', run)
 
     def _scratch_files(self):
         entries = self.cbm_pane.selected_entries()
@@ -2035,7 +2129,7 @@ class DiskMasher(tk.Tk):
                     self._set_status(f"Scratched {total} file{'s' if total > 1 else ''}.")
             self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op('Scratching', run)
 
     def _read_from_cbm(self):
         entries = self.cbm_pane.selected_entries()
@@ -2075,7 +2169,7 @@ class DiskMasher(tk.Tk):
                                      (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op('Reading files', run)
 
     def _read_to_image(self):
         left_files = self.fs_pane.selected_files()
@@ -2172,7 +2266,7 @@ class DiskMasher(tk.Tk):
                         (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op('Reading to image', run)
 
     def _write_to_cbm(self):
         files = self.fs_pane.selected_files()
@@ -2227,7 +2321,7 @@ class DiskMasher(tk.Tk):
                                      (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op('Writing files', run)
 
     def _write_image_to_cbm(self, path):
         size     = os.path.getsize(path)
@@ -2371,7 +2465,7 @@ class DiskMasher(tk.Tk):
                     prog._finish()
                 self.after(0, done)
 
-            threading.Thread(target=run, daemon=True).start()
+            self._start_op('Writing image', run)
 
         ttk.Button(btn_frame, text="Write", command=_do_write).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
@@ -2486,7 +2580,7 @@ class DiskMasher(tk.Tk):
         def _probe():
             res = probe_disk()
             self.after(0, lambda: _probed(res))
-        threading.Thread(target=_probe, daemon=True).start()
+        self._start_op('Reading image', _probe)
 
         def _do_read():
             if str(read_btn.cget("state")) == "disabled":
@@ -2565,7 +2659,7 @@ class DiskMasher(tk.Tk):
                     prog._finish()
                 self.after(0, done)
 
-            threading.Thread(target=run, daemon=True).start()
+            self._start_op('Reading image', run)
 
         fname_entry.bind("<Return>", lambda e: _do_read())
         dlg.wait_window()
@@ -2574,6 +2668,7 @@ class DiskMasher(tk.Tk):
         """Return (prog, pbar, close_btn, _append, proc_store, cancel_event): a progress Toplevel.
         proc_store[0] holds the running Popen (set by _pty_run) so Cancel stops the right one;
         after a cancel, workers must check cancel_event and leave the bus alone."""
+        self._close_stale()
         prog = tk.Toplevel(self)
         prog.title(title)
         prog.geometry("680x380")
@@ -2630,6 +2725,7 @@ class DiskMasher(tk.Tk):
 
         def _finish():
             finished[0] = True
+            prog._stale = True          # closed by the next drive action (_close_stale)
             cancel_btn.configure(state="disabled")
             close_btn.configure(state="normal")
 
@@ -2764,13 +2860,13 @@ class DiskMasher(tk.Tk):
                         # In a thread: a hung reset must not freeze the UI.
                         _run_bounded(["cbmctrl", "reset"], 5)
                         self.after(0, self.cbm_pane.refresh)
-                    self.after(1500, lambda: threading.Thread(
-                        target=_reset_and_refresh, daemon=True).start())
+                    self._start_op("Resetting the drive",
+                                   lambda: (time.sleep(1.5), _reset_and_refresh()))
                     prog._finish()
 
                 self.after(0, done)
 
-            threading.Thread(target=run, daemon=True).start()
+            self._start_op('Formatting', run)
 
         ttk.Button(btn_frame, text="Format", command=_do_format).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
@@ -2871,7 +2967,7 @@ class DiskMasher(tk.Tk):
                 self.cbm_pane.refresh()
             self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op('Erasing', run)
 
     def _add_image_frame(self, dlg, row, enabled=True):
         """The 'Safety copy' section of the Sort and FB-ify dialogs.
@@ -3127,7 +3223,7 @@ class DiskMasher(tk.Tk):
                     shutil.rmtree(tmpdir, ignore_errors=True)
                 self.after(0, done)
 
-        threading.Thread(target=run, daemon=True).start()
+        self._start_op(verb, run)
 
     def _sort_disk(self):
         if not self.cbm_pane._entries:
@@ -3136,7 +3232,7 @@ class DiskMasher(tk.Tk):
                 raw = cbm_dir(DRIVE)
                 self.after(0, lambda: self.cbm_pane._apply_dir(raw))
                 self.after(0, self._sort_disk)
-            threading.Thread(target=_refresh, daemon=True).start()
+            self._start_op('Refreshing', _refresh)
             return
         entries = self.cbm_pane._entries
 
@@ -3204,7 +3300,7 @@ class DiskMasher(tk.Tk):
                 raw = cbm_dir(DRIVE)
                 self.after(0, lambda: self.cbm_pane._apply_dir(raw))
                 self.after(0, self._fbify_disk)
-            threading.Thread(target=_refresh, daemon=True).start()
+            self._start_op('Refreshing', _refresh)
             return
         dlg = tk.Toplevel(self)
         dlg.title("FB-ify disk")
