@@ -28,6 +28,21 @@ class Wrappers(FakeTools):
             self.assertIsNone(d.cbm_read_file("8", "matrix", dest))
             self.assertTrue(os.path.isfile(os.path.join(dest, "matrix.prg")))
 
+    def test_read_opens_with_the_type(self):
+        # A plain name opens as PRG: a SEQ/USR file then fails with 64 FILE TYPE MISMATCH
+        # (real drive, 2026-11-25), so the type goes into the name.
+        with tempfile.TemporaryDirectory() as dest:
+            self.scenario(cbmread={"out": "[Info] 00, OK,00,00\n[Info] reading x -> x.seq",
+                                   "creates": "x.seq"})
+            for ftype, arg in (("seq", "x,s"), ("usr<", "x,u"), ("*prg", "x,p"),
+                               ("rel", "x"), (None, "x")):
+                self.assertIsNone(d.cbm_read_file("8", "x", dest, ftype=ftype))
+                self.assertEqual(self.calls()[-1], f"cbmread 8 {arg}")
+
+    def test_type_char(self):
+        self.assertEqual([d.type_char(t) for t in ("prg", "SEQ", "usr<", "*seq", "rel", "del")],
+                         ["p", "s", "u", "s", "r", None])
+
     def test_read_says_ok_but_writes_nothing(self):
         with tempfile.TemporaryDirectory() as dest:
             self.scenario(cbmread={"out": "[Info] reading matrix -> matrix.prg"})

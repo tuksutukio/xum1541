@@ -52,6 +52,15 @@ Key options:
   and, when stopped, left the 1571 unresponsive until a power cycle. `cbmctrl reset` + 2 s first fixed both, every
   time (2026-11-25, 1571). `cbmctrl dir` and a scratch don't cause it. diskmasher does this in `reset_and_settle()`.
 
+**File types with `cbmread`/`cbmwrite`/`cbmctrl command` (tested 2026-11-25, drive 9, 1571):**
+- `cbmread <unit> name` opens the file as PRG: a SEQ or USR file fails with `64, FILE TYPE MISMATCH`. Put the type
+  in the name (`name,s`, `name,u`, `name,p`); the local file then gets `.seq`/`.usr`/`.prg`. A wrong type
+  (`seqfile,p`) gives the same 64.
+- `cbmwrite` takes the type from the local file's extension when `-f` isn't given (`x.seq` → `x,s,w`, also with
+  `-o newname`); `-f S`/`-f U` set it explicitly. An existing name fails with `63, FILE EXISTS` (as `[Fatal]`).
+- `cbmctrl command` sends its text raw (no PETSCII conversion): file names in a DOS command must be uppercase
+  ASCII (`S0:SEQTEST`). Lowercase names match nothing, and the drive still answers `01, FILES SCRATCHED,00`.
+
 **Disk facts seen with these tools (2026-11-25, 1571 in 1541 mode):**
 - The disk ID is in two places: the BAM (18/0 `$A2–$A3`, what a directory listing shows) and every sector header,
   written only by a format. `d64copy` writes the BAM, not the headers. To see the header ID, send `I` and read the

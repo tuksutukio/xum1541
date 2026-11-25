@@ -33,7 +33,7 @@ def _save_prefs(cfg):
 
 DRIVE = "8"   # the drive all operations use; changed only by DiskMasher._select_drive
 START_DIR = os.path.expanduser("~")
-RELEVANT_EXTENSIONS = {".d64", ".d71", ".d81", ".prg", ".t64", ".tap", ".crt"}
+RELEVANT_EXTENSIONS = {".d64", ".d71", ".d81", ".prg", ".seq", ".usr", ".t64", ".tap", ".crt"}
 TYPE_EXT = {"PRG": ".prg", "SEQ": ".seq", "USR": ".usr", "REL": ".rel"}
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -946,13 +946,24 @@ def _opencbm_error(output):
     return " / ".join(bad) or None
 
 
-def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None):
+def type_char(ftype):
+    """The DOS type letter for a listing type ("prg", "SEQ", "*seq", "usr<"), or None."""
+    return {"PRG": "p", "SEQ": "s", "USR": "u", "REL": "r"}.get(ftype.strip("*<").upper())
+
+
+def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None, ftype=None):
     """Read a single file from CBM drive into dest_dir. Returns error string or None.
-    Success means: no failure line in cbmread's output, and the file it names exists."""
+    Success means: no failure line in cbmread's output, and the file it names exists.
+    Pass the listing's ftype: cbmread opens a plain name as PRG, so a SEQ or USR file
+    fails with 64 FILE TYPE MISMATCH unless the name carries its type ("name,s"; tested
+    2026-11-25, drive 9). The local file then gets .seq/.usr, which cbmwrite reads back
+    as the type."""
     started = time.monotonic()
+    t = type_char(ftype) if ftype else None
+    arg = f"{cbm_name},{t}" if t in ("p", "s", "u") else cbm_name
     try:
         proc = subprocess.Popen(
-            ["cbmread", drive, cbm_name],
+            ["cbmread", drive, arg],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, errors="replace", cwd=dest_dir)
         if proc_store is not None:
@@ -962,7 +973,7 @@ def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None):
         finally:
             if proc_store is not None:
                 proc_store[0] = None
-        log_cmd(["cbmread", drive, cbm_name], started, f"exit {proc.returncode}", out)
+        log_cmd(["cbmread", drive, arg], started, f"exit {proc.returncode}", out)
         err = _opencbm_error(out)
         if err:
             return err
@@ -2044,7 +2055,7 @@ class DiskMasher(tk.Tk):
                 if cancel_event.is_set():
                     break
                 set_msg(f"[{i}/{total}]  {name}")
-                err = cbm_read_file(DRIVE, name, dest_dir, proc_store)
+                err = cbm_read_file(DRIVE, name, dest_dir, proc_store, ftype)
                 if cancel_event.is_set():
                     break
                 if err:
@@ -2085,7 +2096,6 @@ class DiskMasher(tk.Tk):
         img_name, img_path = images[0]
         total       = len(entries)
         need_blocks = sum(b for b, _, _ in entries)
-        TYPE_CHAR   = {"PRG": "p", "SEQ": "s", "USR": "u", "REL": "r"}
 
         # Pre-flight: writable?
         if not os.access(img_path, os.W_OK):
@@ -2123,7 +2133,7 @@ class DiskMasher(tk.Tk):
                     set_msg(f"[{i}/{total}]  {name}")
 
                     per_dir = tempfile.mkdtemp(dir=tmp)
-                    err = cbm_read_file(DRIVE, name, per_dir, proc_store)
+                    err = cbm_read_file(DRIVE, name, per_dir, proc_store, ftype)
                     if cancel_event.is_set():
                         break
                     if err:
@@ -2137,10 +2147,10 @@ class DiskMasher(tk.Tk):
                         continue
                     local_file = os.path.join(per_dir, tmp_files[0])
 
-                    type_char = TYPE_CHAR.get(ftype.lstrip("*").upper(), "p")
+                    tc = type_char(ftype) or "p"
                     r2 = subprocess.run(
                         [_C1541, "-attach", img_path,
-                         "-write", local_file, f"{name},{type_char}"],
+                         "-write", local_file, f"{name},{tc}"],
                         capture_output=True, text=True, timeout=30)
                     if r2.returncode != 0:
                         errors.append(
@@ -3019,7 +3029,7 @@ class DiskMasher(tk.Tk):
                             return
                         set_msg(f"[{i}/{len(snap)}]  {name}", fraction=(i - 1) / len(snap), detail=det3)
                         sub = tempfile.mkdtemp(dir=tmpdir)
-                        err = cbm_read_file(DRIVE, name, sub, proc_store)
+                        err = cbm_read_file(DRIVE, name, sub, proc_store, ftype)
                         got = os.listdir(sub)
                         if not err and len(got) != 1:
                             err = f"expected one file, got {len(got)}"

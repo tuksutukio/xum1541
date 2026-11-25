@@ -34,8 +34,8 @@ messages mean. For installation requirements, see [README.md](README.md).
 
 The window has two panes side by side.
 
-- **Left: your Mac.** Folders, disk images (`.d64`, `.d71`, `.d81`) and Commodore files (`.prg`, `.t64`, `.tap`,
-  `.crt`). Other files are not shown.
+- **Left: your Mac.** Folders, disk images (`.d64`, `.d71`, `.d81`) and Commodore files (`.prg`, `.seq`, `.usr`,
+  `.t64`, `.tap`, `.crt`). Other files are not shown.
   - Above the list: the current folder, the **File** menu, **Refresh**, and **Write →**.
   - Below the list: how many folders and files there are, and what's selected. For a selected image that is the
     format and, with VICE installed, its free blocks; for files, their total size in blocks and kB.
@@ -315,4 +315,6 @@ that yet.
   1541/1571 DOS. 40-track images come from reading 40-track disks.
 - Erase and Make first work with 1541, 1570 and 1571 drives.
 - Write files only offers what the left pane shows (see [The window](#the-window)).
+- REL (relative) files can't be read or written one by one; reading or writing the whole disk as an image
+  carries them along.
 - If the xum1541 itself locks up, only replugging its USB cable helps.
