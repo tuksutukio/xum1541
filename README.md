@@ -64,7 +64,7 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 
 ### Local pane
 - Replace the "↑ Up" button with a `..` entry at the top of the file list (double-click goes up one directory)
-- A "File" button in the freed space, with Delete and New directory (New directory moves there from "New"; where New → Image… goes is open). Delete means the left pane is no longer read-light: update "What it is (and isn't)" when this lands, and delete to the macOS Trash rather than for good
+- A "File" button in the freed space, with Delete and New directory (New directory moves there from "New"; where New → Image… goes is open). Decided 2026-11-25, revising the earlier read-light rule: Delete is for clearing out test and intermediate files and folders, New directory for setting up a working folder for a disk project, both without leaving the app; copying, moving, renaming and the rest stay with the Finder. Delete moves to the macOS Trash. Update "What it is (and isn't)" when this lands
 
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)
