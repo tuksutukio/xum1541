@@ -283,3 +283,12 @@ d64copy -2 8 image.d71       # two-sided (1571)
 | 196,608 | 40-track d64 |
 | 349,696 | d71 (two-sided 1571) |
 | 819,200 | d81 (1581) |
+
+## d64copy leaves a 1571 at 2 MHz (2026-11-25)
+
+After `d64copy` (read or write) on a 1571, the drive can stay at 2 MHz while its DOS is in 1541 mode: VIA 1 `$1801` bit 5
+stays set (believed to be the 1/2 MHz select; `drive-1571-service-manual-1986` p.12 documents a 1 MHz/2 MHz
+select line but not which VIA pin drives it). Directory reads, `V` and further `d64copy` runs still work, but opening a file for writing fails:
+`cbmwrite` prints `[Fatal] could not open file for writing: 74,DRIVE NOT READY,18,00` and exits 0. The job queue
+shows the controller returned `$0F` for the BAM jobs. `cbmctrl reset` clears it (bit 5 back to 0), and the same
+write then succeeds. Diskmasher resets after every `d64copy` (`after_d64copy`).

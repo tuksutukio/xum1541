@@ -26,6 +26,7 @@ def _text(path):
 
 _LOG_DIR = tempfile.mkdtemp(prefix="diskmasher-test-log-")
 d.LOG_FILE = os.path.join(_LOG_DIR, "diskmasher.log")
+d.DIR_BACKUP_DIR = os.path.join(_LOG_DIR, "directory-backups")
 
 
 # --- .d64 builder ---
@@ -60,9 +61,15 @@ def make_d64(tracks=35, name="TEST", files=(), errors=None, double_sided=False,
         bam[0xAC] = 0x11
     put(18, 0, bam)
 
-    dir_sector = bytearray(256)
-    dir_sector[0:2] = bytes([0, 0xFF])
+    # Directory: 8 entries per sector, chained 18/1, 18/4, 18/7, … like the DOS does.
+    files = list(files)
+    dir_secs = [1 + 3 * n for n in range(max(1, (len(files) + 7) // 8))]
+    dir_data = {s: bytearray(256) for s in dir_secs}
+    for n, s in enumerate(dir_secs):
+        nxt = dir_secs[n + 1] if n + 1 < len(dir_secs) else None
+        dir_data[s][0:2] = bytes([18, nxt]) if nxt else bytes([0, 0xFF])
     for i, f in enumerate(files):
+        dir_sector, i = dir_data[dir_secs[i // 8]], i % 8
         e = bytearray(32)
         e[2] = f.get("type", 0x82)
         chain = f["sectors"]
@@ -73,14 +80,21 @@ def make_d64(tracks=35, name="TEST", files=(), errors=None, double_sided=False,
         blocks = f.get("blocks", len(chain))
         e[30], e[31] = blocks & 0xFF, blocks >> 8
         dir_sector[32 * i + 2:32 * i + 32] = e[2:]
+        content = f.get("data")              # real file bytes, 254 per sector
         for j, (t, s) in enumerate(chain):
             blk = bytearray(b"\x55" * 256)
+            if content is not None:
+                chunk = content[254 * j:254 * j + 254]
+                blk[2:2 + len(chunk)] = chunk
             if j + 1 < len(chain):
                 blk[0], blk[1] = chain[j + 1]
+            elif content is not None:
+                blk[0], blk[1] = 0, len(content) - 254 * j + 1   # last used byte
             else:
                 blk[0], blk[1] = f.get("link", (0, 0xFF))
             put(t, s, blk)
-    put(18, 1, dir_sector)
+    for s, data in dir_data.items():
+        put(18, s, data)
 
     for (t, s), data in (raw or {}).items():
         put(t, s, data)
@@ -91,6 +105,14 @@ def make_d64(tracks=35, name="TEST", files=(), errors=None, double_sided=False,
             table[d._blk(t, s)] = code
         img += table
     return bytes(img)
+
+
+def basic_rem(text, line=10, addr=0x0801):
+    """A one-line BASIC program `<line> REM <text>` as PRG bytes (load address first):
+    LIST then shows e.g. "10 rem game", so the screen tells which file was loaded."""
+    body = bytes([line & 0xFF, line >> 8, 0x8F, 0x20]) + text.upper().encode() + b"\x00"
+    nxt = addr + 2 + len(body)
+    return bytes([addr & 0xFF, addr >> 8, nxt & 0xFF, nxt >> 8]) + body + b"\x00\x00"
 
 
 # --- fake opencbm tools ---
@@ -140,7 +162,15 @@ class FakeTools(unittest.TestCase):
         p = os.path.join(self.state, "jobs.log")
         if not os.path.exists(p):
             return []
-        return [(int(c, 16), int(t)) for c, t in (l.split() for l in _text(p).splitlines())]
+        return [(int(c, 16), int(t)) for c, t, *_ in (l.split() for l in _text(p).splitlines())]
+
+    def jobs_ts(self):
+        """[(code, track, sector)] for every job put in slot 2."""
+        p = os.path.join(self.state, "jobs.log")
+        if not os.path.exists(p):
+            return []
+        return [tuple(int(x, 16) if i == 0 else int(x) for i, x in enumerate(l.split()))
+                for l in _text(p).splitlines()]
 
     def commands(self):
         """The DOS commands sent with `cbmctrl command`."""

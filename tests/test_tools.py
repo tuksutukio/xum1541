@@ -118,6 +118,33 @@ class Erase(FakeTools):
         self.assertEqual(self.jobs(), [])
 
 
+class FullRead(FakeTools):
+    def test_reset_after_d64copy(self):
+        img = self.write_file("full.d64", make_d64())
+        self.scenario(d64copy={"full": {"image": img, "out": "683 blocks copied."}})
+        dest = os.path.join(self.state, "out.d64")
+        self.assertIsNone(d.read_disk_to_file(dest, 35))
+        self.assertEqual(self.calls()[-1], "cbmctrl reset")
+
+    def test_no_reset_after_cancel(self):
+        import threading
+        img = self.write_file("full.d64", make_d64())
+        self.scenario(d64copy={"full": {"image": img, "out": "683 blocks copied."}})
+        ev = threading.Event()
+        orig = d.stream_cmd
+
+        def cancelled_during(cmd, on_text, proc_store=None):
+            rc = orig(cmd, on_text, proc_store)
+            ev.set()                       # Cancel pressed while d64copy ran
+            return rc
+        d.stream_cmd = cancelled_during
+        try:
+            d.read_disk_to_file(os.path.join(self.state, "out.d64"), 35, cancel_event=ev)
+        finally:
+            d.stream_cmd = orig
+        self.assertTrue(self.calls()[-1].startswith("d64copy"))
+
+
 class DiskCheck(FakeTools):
     """probe_disk's track-36 rule (CLAUDE.md "Track 36 in probe_disk")."""
 
@@ -151,6 +178,14 @@ class DiskCheck(FakeTools):
         r = self.check(self.write_file("t36.d64", bytes(img)),
                        "[Warning] giving up...\n8 blocks copied.")
         self.assertEqual((r["t36_ok"], r["t36_readable"], r["t36_partial"]), (8, False, True))
+
+    def test_reset_after_the_last_d64copy(self):
+        # d64copy can leave a 1571 at 2 MHz under its 1541-mode DOS: file writes then fail
+        # with 74 until a reset (drive 8, 2026-11-25).
+        self.check(self.write_file("t36.d64", bytes(196608)), "")
+        calls = self.calls()
+        last_copy = max(i for i, c in enumerate(calls) if c.startswith("d64copy"))
+        self.assertIn("cbmctrl reset", calls[last_copy + 1:])
 
     def test_track_18_unreadable(self):
         self.scenario(d64copy={"18": {"out": "[Fatal] drive 08 (1571): 74,DRIVE NOT READY"}})

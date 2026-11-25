@@ -28,6 +28,7 @@ It is **not** a general-purpose file manager. The left pane does only what a dis
 - **FB-ify disk** — write a File Browser boot file to the disk; platform variants: C16/Plus4, C64, C128, VIC-20 (all five memory-configuration variants), All; same safety steps as Sort
 - **Sort disk** — reorganise files on disk: optional FB first, PRGs alphabetically, then SEQ/USR/REL. Before anything is scratched, it checks the disk, reads the whole disk to an image (35 or 40 tracks, about a minute) and analyses it, then reads every file; a double-sided disk, files reaching beyond track 35, read errors inside files, unsupported file types, or a disk swapped since the listing stop it with the disk unchanged. The dialog shows each step, real progress and the time left. Keeping the image is optional; if rewriting fails after the scratch, the read files go to a `…_rescue` folder and the image is kept
 - **Erase disk** — wipe tracks 36–40 (turns a 40-track disk into a clean 35-track one; tracks 1–35 untouched) or the whole disk (reads as never formatted afterwards). A small routine of our own runs in the drive and overwrites each track with sync-free bytes; it stops at once on a write-protected disk, and afterwards the disk check confirms the result. 1541/1570/1571 only
+- **Make first (LOAD"*")** — right pane File menu: moves the selected PRG to the first directory slot, so `LOAD"*",8` (or `,8,1`) loads it after a drive reset or power-on; the other files keep their order. Only the directory sectors on track 18 are rewritten (file data and the BAM are untouched), and only after the directory read from the disk matches the listing on screen; the original sectors are saved first to `~/Library/Application Support/Diskmasher/directory-backups/`, and what was written is read back and compared. Cancel works until the writing starts. To sort the other files, run Sort first
 
 ### Disk image operations *(requires VICE/c1541)*
 - **Create new image** — create a blank `.d64` image (35-track, 174848 bytes) in the current local directory; disk name and filename are kept in sync; d71/d81 greyed out pending implementation
@@ -48,7 +49,7 @@ It is **not** a general-purpose file manager. The left pane does only what a dis
 
 ## Testing status
 
-An offline test suite (58 tests, about 6 seconds, no drive needed) covers disk image analysis, parsing of opencbm output, the erase routine's bytes, and the drive protocols against simulated opencbm tools: success and failure detection, the erase job sequence, recovery from `74,DRIVE NOT READY`, and the track-36 disk check. Run it with `python3.13 -m unittest discover -s tests`. Tests against a real drive are still to come.
+An offline test suite (about 40 seconds, no drive needed) covers disk image analysis, parsing of opencbm output, the erase routine's bytes, and the drive protocols against simulated opencbm tools: success and failure detection, the erase job sequence, recovery from `74,DRIVE NOT READY`, the track-36 disk check, and Make first's directory edit. Make first is also checked on an emulated C64: VICE (with its real 1541 DOS) must load the moved file with `LOAD"*",8` and `,9`. That test needs VICE and the sibling c64home project, and is skipped without them. Run everything with `python3.13 -m unittest discover -s tests`. Tests against a real drive are still to come.
 
 Most IEC operations have been exercised extensively in normal use. Cancel handling has been tested under adverse conditions: drive power cycle mid-read, IEC cable unplug mid-read, and cancel during reads on disks with bad sectors. The bus has proven more resilient than initially expected — no true xum1541 firmware lockups were reproduced during testing.
 
@@ -61,9 +62,6 @@ The **Read IEC files to image** feature is newly implemented and has seen limite
 The current "Read to image…" implementation is deliberately minimal: it reads each selected CBM file to a temporary directory via `cbmread`, then writes it into the local image with `c1541 -write`. There is no integration between the image view and the transfer — the image directory popup is a one-shot modal, not a live view. This is enough to support the core workflow (pull files off an old floppy, drop them into an image, write the image back to a fresh disk) but is not a polished end-state.
 
 ## Planned and to-do
-
-### Drive operations
-- Make a file the first one in the directory — mark a file in the right pane and move it to the first directory slot, so it loads with `LOAD"*",8` / `LOAD"*",8,1`; the other files either keep their order or get sorted (a choice in the dialog). Likely built on Sort's safe rewrite (`_rewrite_disk`) (requested 2026-11-25)
 
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)

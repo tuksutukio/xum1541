@@ -10,11 +10,14 @@ The "UI layout" and "lockup" sections moved here on 2026-10-15 from Claude's per
 ## Running
 
 - `./diskmasher.py` (shebang `/opt/homebrew/bin/python3.13`; stdlib only, no venv or requirements file).
-- Offline tests (stdlib `unittest`, no hardware, ~6 s): `/opt/homebrew/bin/python3.13 -B -m unittest discover -s tests`
+- Offline tests (stdlib `unittest`, no hardware, ~40 s): `/opt/homebrew/bin/python3.13 -B -m unittest discover -s tests`
   (one file: add `-p test_tools.py`). Run them after every change. `tests/_common.py` builds `.d64` images
   (`make_d64`) and puts fake opencbm tools (`tests/fake_opencbm.py`, with a simulated drive memory and job queue) on
   `PATH`; it also points `LOG_FILE` at a temp file. New opencbm behaviour learnt on hardware goes into the fakes as a
   scenario, with the real output text.
+- `tests/test_vice.py` (~30 s of the run) checks Make first on an emulated C64: VICE with true drive emulation,
+  `LOAD"*",8`/`,9` must load the moved file. It uses `../c64home/tools/vicetest.py` by relative path and VICE's
+  `x64sc`, and is skipped when either is missing.
 - The tests can't prove IEC behaviour: a change to a drive operation still needs a run against real hardware
   (xum1541 + a drive), so say what's untested and ask Antti to try it. No linter or build step.
 - External tools: opencbm via Homebrew (`cbmctrl`, `cbmwrite`, `cbmread`, `d64copy`, `cbmforng`, `cbmformat`); VICE's
@@ -41,8 +44,10 @@ to disk (`FB_PATHS` maps platform → files).
   Workers must check `cancel_event` and skip any further `cbmctrl`/`cbm_dir` call, including the final refresh.
 - **Never `subprocess.run(timeout=…)` for opencbm tools:** on timeout it SIGKILLs. Use `_run_bounded` (short
   commands) or `_stop_proc` (SIGTERM, 3 s grace, SIGKILL only if still alive).
-- **`reset_and_settle()` before every `d64copy`** (a `d64copy` right after `cbmread`/`cbmwrite` can stall; see
-  opencbm-tools.md). Judge `cbmread`/`cbmwrite` success with `_opencbm_error`, never by exit code alone.
+- **`reset_and_settle()` before every `d64copy`, and `after_d64copy()` after it** (a `d64copy` right after
+  `cbmread`/`cbmwrite` can stall; and `d64copy` can leave a 1571 at 2 MHz under its 1541-mode DOS, after which every
+  file write fails with `74,DRIVE NOT READY,18,00` until a reset; see opencbm-tools.md). After a Cancel the cancel
+  sequence resets instead. Judge `cbmread`/`cbmwrite` success with `_opencbm_error`, never by exit code alone.
 - **Disk checking, no drive access:** `analyze_image()` walks the directory and every file's sector chain in an
   image (files beyond track 35, read errors inside files, unsupported types, data on 36–40 outside files,
   double-sided flag); `describe_image()` turns that into text.
@@ -65,6 +70,11 @@ to disk (`FB_PATHS` maps platform → files).
   Write protect is honoured (tested 2026-11-25, drive 9), but the 1571's sensor is optical: clear tape over the notch
   lets the light through, so the drive (DOS writes too) sees the disk as unprotected. Use opaque tape. The sense bit
   is `$1C00` bit 4 (0 = protected), readable with `cbmctrl download <unit> 0x1C00 1`.
+- **Directory editing (`move_to_first_slot`, Make first):** sector read/write jobs (`$80`/`$90`) in slot 2 via
+  `_read_sector`/`_write_sector`, after bump + seek 18 (the seek teaches the drive the disk ID; without it reads give
+  29). Checks the directory against the pane listing, saves a JSON backup (`DIR_BACKUP_DIR`;
+  `restore_directory_backup()` writes it back), writes only changed sectors, reads them back. The writes run inside
+  the task dialog's `enter_critical()`, which turns Cancel off without a race: never leave half a directory.
 - **74,DRIVE NOT READY can be the head, not the disk:** after a reset or disk change the DOS checks the drive by reading
   one header on whatever track the head is on (1541 ROM `LC63D` → `LD00E`); on a blank or unreadable track it sets a
   not-ready flag and answers 74 until `I`, even once the head is back on a good track (found 2026-11-25 after a
@@ -121,6 +131,11 @@ to disk (`FB_PATHS` maps platform → files).
   drive's command channel were fine (`detect`, `status` OK), and the same disks read in a spare 1571 at device 9.
   Suspected overheating (disks covering the vents). Don't read this as an adapter lockup.
 
+- **Writes fail after `d64copy`, 2026-11-25 (drive 8, 1571):** twice, a file write (`cbmwrite`) right after a `d64copy`
+  (a read at 15:15, a Write image at 16:13) failed with `74,DRIVE NOT READY,18,00` while directory reads and `V` worked.
+  The controller had rejected the BAM jobs with `$0F`; VIA 1 `$1801` bit 5 was still set from `d64copy` (believed to be the 1/2 MHz select; the service
+  manual p.12 confirms such a line, not which pin drives it).
+  `cbmctrl reset` fixed it at once. Not a drive fault and not about which drive formatted the disk (first suspected).
 - **Next if it recurs:** try the SIGKILL-from-terminal case first. Real fix: a programmatic USB device reset via
   macOS IOKit, or check whether `xum1541cfg` has a reset command. Not yet investigated.
 - Why it matters: old CBM hardware never needed power cycling; the xum1541 USB bridge is the weak link.

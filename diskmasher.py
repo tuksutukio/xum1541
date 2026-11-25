@@ -6,6 +6,7 @@ Commander-style split view: filesystem navigator | CBM device directory
 
 import configparser
 import glob
+import json
 import math
 import os
 import pty
@@ -263,6 +264,17 @@ def reset_and_settle():
     time.sleep(2)
 
 
+def after_d64copy(cancel_event=None):
+    """reset_and_settle() after every d64copy, unless the run was cancelled (then the cancel
+    sequence owns the bus and resets it itself). d64copy's fast-transfer code can leave a
+    1571 at 2 MHz under its 1541-mode DOS (VIA 1 $1801 bit 5 stays set; believed to be the
+    1/2 MHz select, drive-1571-service-manual-1986 p.12 has the line but not the pin); the DOS then
+    reads fine but every file write fails with 74,DRIVE NOT READY,18,00 (controller job
+    result $0F) until a reset. Seen twice on drive 8, 2026-11-25; a reset fixed it both times."""
+    if cancel_event is None or not cancel_event.is_set():
+        reset_and_settle()
+
+
 def stream_cmd(cmd, on_text, proc_store=None):
     """Run cmd under a pty (opencbm tools buffer their progress output on a pipe) and call
     on_text(chunk) from this thread as output arrives. Returns the exit code.
@@ -344,6 +356,7 @@ def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_ev
         rc = stream_cmd(cmd, _text, proc_store)
     except OSError as e:
         return str(e)
+    after_d64copy(cancel_event)
     text = "".join(out)
     size = os.path.getsize(path) if os.path.exists(path) else 0
     copied, expected = blocks_copied(text, tracks)
@@ -356,6 +369,13 @@ def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_ev
 
 
 def probe_disk(proc_store=None, cancel_event=None, track18=True):
+    """The disk check (_probe_disk), then a reset: it runs d64copy (see after_d64copy)."""
+    res = _probe_disk(proc_store, cancel_event, track18)
+    after_d64copy(cancel_event)
+    return res
+
+
+def _probe_disk(proc_store=None, cancel_event=None, track18=True):
     """Quick read-only look at the disk in the drive (about 3 s per track on a 1571).
 
     Reads track 18 (BAM: name, double-sided flag, extended BAM) and track 36 (is the disk
@@ -555,6 +575,199 @@ def erase_tracks(tracks, on_progress=None, proc_store=None, cancel_event=None):
     recover_head(bump=False)
     log_event("--- erase done")
     return True, "done"
+
+
+# --- Directory editing (job queue, buffer 2) ---
+
+DIR_BACKUP_DIR = os.path.expanduser("~/Library/Application Support/Diskmasher/directory-backups")
+
+
+def _job_error(code):
+    """Controller job result → DOS error text (codes: c64-inside-commodore-dos p.103)."""
+    names = {0x02: "20, READ ERROR (header not found)", 0x03: "21, READ ERROR (no sync)",
+             0x04: "22, READ ERROR (data block not found)", 0x05: "23, READ ERROR (checksum)",
+             0x07: "25, WRITE ERROR (verify)", 0x08: "26, WRITE PROTECT ON",
+             0x09: "27, READ ERROR (header checksum)", 0x0B: "29, DISK ID MISMATCH",
+             0x0F: "74, DRIVE NOT READY"}
+    return names.get(code, "no answer from the drive" if code is None else f"job result ${code:02X}")
+
+
+def _read_sector(t, s, tmp, proc_store=None, cancel_event=None):
+    """(bytes, None) or (None, error text). Job $80 into buffer 2, then download it."""
+    if not _drive_mem_write(_HDR2, bytes([t, s]), tmp, proc_store, cancel_event):
+        return None, "no answer from the drive"
+    r = _drive_job(0x80, tmp, proc_store, cancel_event)
+    if r != 0x01:
+        return None, _job_error(r)
+    data = _drive_mem_read(_BUF2, 256, tmp, proc_store, cancel_event)
+    return (data, None) if data else (None, "no answer from the drive")
+
+
+def _write_sector(t, s, data, tmp):
+    """None or error text. Upload to buffer 2, then job $90. Not cancellable on purpose."""
+    if not _drive_mem_write(_BUF2, data, tmp) or not _drive_mem_write(_HDR2, bytes([t, s]), tmp):
+        return "no answer from the drive"
+    r = _drive_job(0x90, tmp)
+    return None if r == 0x01 else _job_error(r)
+
+
+def _petscii_key(raw):
+    """A loose comparison key for a file name: letters and digits only, lower case. Raw
+    directory bytes ($41–$5A and $C1–$DA are letters) and cbmctrl's listing (which shows
+    them lower and upper case) give the same key."""
+    out = []
+    for b in raw:
+        if 0x41 <= b <= 0x5A or 0x61 <= b <= 0x7A or 0xC1 <= b <= 0xDA:
+            out.append(chr((b & 0x1F) + 0x60))
+        elif 0x30 <= b <= 0x39:
+            out.append(chr(b))
+    return "".join(out)
+
+
+def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_event=None,
+                       enter_critical=None):
+    """Move the `index`th listed file to the first directory slot, so LOAD"*" loads it
+    (after a drive reset or power-on, "*" means the first file in the directory). The
+    other files keep their order; file data and the BAM are not touched.
+
+    listing: the right pane's entries [(blocks, name, type)] in directory order; the
+    directory read from the disk must match it (else the disk was changed since).
+    Steps: bump + seek 18 (the drive learns the disk ID), read the chain from 18/1,
+    check, save the original sectors to DIR_BACKUP_DIR, write only the changed sectors
+    (enter_critical() is called first and turns Cancel off), read them back, `I`.
+    Returns (ok, message, backup)."""
+    def step(text):
+        if on_step:
+            on_step(text)
+
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+
+    log_event(f"--- move listed file {index} to the first directory slot on drive {DRIVE}")
+    step("Preparing the drive…")
+    reset_and_settle()
+    if cancelled():
+        return False, "cancelled", None
+    det = _run_bounded(["cbmctrl", "detect"], 10)
+    model = dict(parse_detect(det[1])).get(DRIVE, "") if det and det[0] == 0 else ""
+    if not re.match(r'15(41|70|71)', model):
+        return False, (f"drive {DRIVE} does not answer" if not model else
+                       f"only implemented for 1541/1570/1571 drives, not {model}"), None
+    if model.startswith(("1570", "1571")):
+        _run_bounded(["cbmctrl", "command", DRIVE, "U0>M0"], 10)
+        drive_status()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        step("Reading the directory…")
+        ok = (_drive_mem_write(_HDR2, bytes([1, 0]), tmp, proc_store, cancel_event)
+              and _drive_job(0xC0, tmp, proc_store, cancel_event) == 0x01
+              and _drive_mem_write(_HDR2, bytes([18, 0]), tmp, proc_store, cancel_event))
+        r = _drive_job(0xB0, tmp, proc_store, cancel_event) if ok else None
+        if cancelled():
+            return False, "cancelled", None
+        if r != 0x01:
+            return False, f"can't find track 18: {_job_error(r)}", None
+        bam, err = _read_sector(18, 0, tmp, proc_store, cancel_event)
+        if err:
+            return False, ("cancelled" if cancelled() else f"reading 18/0: {err}"), None
+
+        sectors, t, s = [], 18, 1
+        while t:
+            if t != 18 or s >= 19 or any(x[1] == s for x in sectors) or len(sectors) >= 18:
+                return False, "the directory chain is broken; nothing was changed", None
+            data, err = _read_sector(t, s, tmp, proc_store, cancel_event)
+            if err:
+                return False, ("cancelled" if cancelled() else f"reading 18/{s}: {err}"), None
+            sectors.append((t, s, data))
+            t, s = data[0], data[1]
+
+        slots = [(i, k) for i in range(len(sectors)) for k in range(8)]
+        def body(i, k):
+            return sectors[i][2][32 * k + 2:32 * k + 32]
+        listed = [(i, k) for i, k in slots if body(i, k)[0] != 0]
+
+        same = len(listed) == len(listing) and all(
+            (b[28] | (b[29] << 8)) == blocks and
+            _petscii_key(b[3:19].rstrip(b"\xa0")) == _petscii_key(name.encode("latin-1", "replace"))
+            for (i, k), (blocks, name, _) in zip(listed, listing) for b in [body(i, k)])
+        if not same:
+            return False, ("the directory on the disk doesn't match the listing (was the disk "
+                           "changed?); refresh and try again"), None
+        if not 0 <= index < len(listed):
+            return False, "no such file in the listing", None
+        ci, ck = listed[index]
+        chosen = body(ci, ck)
+        name = bytes(chosen[3:19]).rstrip(b"\xa0").decode("latin-1")
+        if (ci, ck) == slots[0]:
+            return True, f'"{name}" is already the first file', None
+        if chosen[0] & 0x87 != 0x82:
+            return False, (f'"{name}" is not a properly closed PRG file; LOAD"*" loads '
+                           "programs"), None
+
+        order = [chosen] + [body(i, k) for i, k in slots if (i, k) != (ci, ck)]
+        new = [bytearray(data) for _, _, data in sectors]
+        for (i, k), b in zip(slots, order):
+            new[i][32 * k + 2:32 * k + 32] = b
+        changed = [i for i in range(len(sectors)) if bytes(new[i]) != sectors[i][2]]
+
+        # From here on Cancel is off (enter_critical, from the task dialog): a directory
+        # must never be left half rewritten.
+        if cancelled() or (enter_critical is not None and not enter_critical()):
+            return False, "cancelled", None
+        os.makedirs(DIR_BACKUP_DIR, exist_ok=True)
+        disk = re.sub(r'[^a-z0-9_-]+', "_", bam[0x90:0xA0].rstrip(b"\xa0")
+                      .decode("latin-1").lower()).strip("_") or "disk"
+        backup = os.path.join(DIR_BACKUP_DIR, f"{disk}-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        with open(backup, "w") as f:
+            json.dump({"drive": DRIVE, "disk_name": bam[0x90:0xA0].hex(),
+                       "disk_id": bam[0xA2:0xA4].hex(), "made": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "note": "original directory sectors before moving a file to the first "
+                               "slot; restore with restore_directory_backup()",
+                       "sectors": {f"{t}/{s}": data.hex() for t, s, data in sectors}}, f, indent=1)
+        log_event(f"--- directory backup: {backup}")
+
+        step("Writing the directory…")
+        for i in changed:                     # not cancellable: never leave half a directory
+            err = _write_sector(sectors[i][0], sectors[i][1], bytes(new[i]), tmp)
+            if err:
+                return False, (f"writing 18/{sectors[i][1]} failed: {err}. The original "
+                               f"directory is saved in {backup}"), backup
+        step("Checking what was written…")
+        for i in changed:
+            data, err = _read_sector(sectors[i][0], sectors[i][1], tmp)
+            if err or data != bytes(new[i]):
+                return False, (f"18/{sectors[i][1]} doesn't read back as written "
+                               f"({err or 'different bytes'}). The original directory is "
+                               f"saved in {backup}"), backup
+    _run_bounded(["cbmctrl", "command", DRIVE, "I"], 10)
+    drive_status()
+    log_event(f"--- {name} is now the first file")
+    return True, f'"{name}" is now the first file: LOAD"*" loads it', backup
+
+
+def restore_directory_backup(path):
+    """Write a directory backup from move_to_first_slot back to the disk in the drive
+    (DRIVE). Checks the disk name and ID first. Returns None or error text."""
+    with open(path) as f:
+        b = json.load(f)
+    reset_and_settle()
+    with tempfile.TemporaryDirectory() as tmp:
+        if not (_drive_mem_write(_HDR2, bytes([1, 0]), tmp) and _drive_job(0xC0, tmp) == 0x01
+                and _drive_mem_write(_HDR2, bytes([18, 0]), tmp) and _drive_job(0xB0, tmp) == 0x01):
+            return "can't find track 18"
+        bam, err = _read_sector(18, 0, tmp)
+        if err:
+            return f"reading 18/0: {err}"
+        if bam[0x90:0xA0].hex() != b["disk_name"] or bam[0xA2:0xA4].hex() != b["disk_id"]:
+            return "this backup is from a different disk (name or ID differs)"
+        for ts, hexdata in b["sectors"].items():
+            t, s = map(int, ts.split("/"))
+            err = _write_sector(t, s, bytes.fromhex(hexdata), tmp)
+            if err:
+                return f"writing {ts}: {err}"
+    _run_bounded(["cbmctrl", "command", DRIVE, "I"], 10)
+    drive_status()
+    return None
 
 
 def _bind_mac_multiselect(lb):
@@ -1255,6 +1468,8 @@ class CbmDirPane(ttk.Frame):
         file_btn  = ttk.Menubutton(nav, text="File")
         file_menu = tk.Menu(file_btn, tearoff=False)
         file_menu.add_command(label="Scratch…", command=lambda: self.event_generate("<<ScratchRequest>>"))
+        file_menu.add_command(label="Make first (LOAD\"*\")…",
+                              command=lambda: self.event_generate("<<MakeFirstRequest>>"))
         file_btn["menu"] = file_menu
         file_btn.pack(side="right", padx=2, pady=2)
 
@@ -1426,6 +1641,7 @@ class DiskMasher(tk.Tk):
         self.cbm_pane.bind("<<ReadImageRequest>>",   lambda e: self._read_image_from_cbm())
         self.cbm_pane.bind("<<ReadToImageRequest>>", lambda e: self._read_to_image())
         self.cbm_pane.bind("<<ScratchRequest>>",     lambda e: self._scratch_files())
+        self.cbm_pane.bind("<<MakeFirstRequest>>",   lambda e: self._make_first())
 
     def _update_read_to_image_state(self):
         if not _C1541:
@@ -1524,6 +1740,27 @@ class DiskMasher(tk.Tk):
         cancel_btn = ttk.Button(dlg, text="Cancel", command=_cancel)
         cancel_btn.pack(pady=(4, 8))
 
+        # A step that must not be interrupted (writing a directory) calls enter_critical()
+        # from the worker: under the lock, either Cancel already won (returns False, do
+        # nothing) or Cancel is off from now on (returns True). No race either way.
+        crit_lock, crit = threading.Lock(), {"on": False}
+        _cancel_plain = _cancel
+
+        def _cancel():
+            with crit_lock:
+                if crit["on"]:
+                    return
+                _cancel_plain()
+        cancel_btn.configure(command=_cancel)
+
+        def enter_critical():
+            with crit_lock:
+                if cancel_event.is_set():
+                    return False
+                crit["on"] = True
+            self.after(0, lambda: dlg.winfo_exists() and cancel_btn.configure(state="disabled"))
+            return True
+
         def set_msg(msg, fraction=None, detail=None):
             def _apply():
                 if not dlg.winfo_exists():
@@ -1548,6 +1785,7 @@ class DiskMasher(tk.Tk):
                     pb.configure(value=int(fraction * 1000))
             self.after(0, _apply)
 
+        set_msg.enter_critical = enter_critical
         return set_msg, dlg.destroy, cancel_event, proc_store
 
     def _cancel_and_recover(self, proc_store, cancel_event):
@@ -1659,6 +1897,55 @@ class DiskMasher(tk.Tk):
                 self._set_status("Refreshed.")
             self.after(0, _done)
         threading.Thread(target=_run, daemon=True).start()
+
+    def _make_first(self):
+        """File → Make first (LOAD"*"): move the selected file to the first directory slot.
+        Only the directory is rewritten (move_to_first_slot); the others keep their order."""
+        sel = self.cbm_pane.lb.curselection()
+        if len(sel) != 1:
+            messagebox.showinfo("Make first", "Select one file in the right pane first.")
+            return
+        index = sel[0]
+        listing = self.cbm_pane._entries[:]
+        blocks, name, ftype = listing[index]
+        if index == 0:
+            messagebox.showinfo("Make first", f'"{name}" is already the first file.')
+            return
+        if ftype.lower().rstrip("<") != "prg":       # "prg<" is locked: fine; "*prg" isn't
+            messagebox.showinfo("Make first",
+                f'"{name}" is a {ftype.upper()} file. LOAD"*" loads programs: pick a PRG.')
+            return
+        if not messagebox.askyesno("Make first",
+                f'Move "{name}" to the first directory slot on drive {DRIVE}?\n\n'
+                'After a drive reset or power-on, LOAD"*",8 (or ,8,1) then loads it. The other '
+                "files keep their order. Only the directory is rewritten; the original is saved "
+                "to a backup first.", parent=self):
+            return
+
+        set_msg, close, cancel_event, proc_store = self._make_task_dialog(
+            "Make first", f'Moving "{name}" to the first slot…')
+        self._set_status(f'Moving "{name}" to the first directory slot…')
+
+        def run():
+            ok, msg, backup = move_to_first_slot(
+                index, listing, on_step=lambda t: set_msg(t), proc_store=proc_store,
+                cancel_event=cancel_event, enter_critical=set_msg.enter_critical)
+
+            def done():
+                close()
+                if cancel_event.is_set() and msg == "cancelled":
+                    return              # _cancel_and_recover reports and refreshes
+                self._set_status(msg[0].upper() + msg[1:] + ".")
+                if ok:
+                    if backup:
+                        messagebox.showinfo("Make first", msg[0].upper() + msg[1:] + ".")
+                else:
+                    messagebox.showerror("Make first",
+                        f"Not done: {msg}." + ("" if backup else "\n\nThe disk was not changed."))
+                self.cbm_pane.refresh()
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _scratch_files(self):
         entries = self.cbm_pane.selected_entries()
@@ -2022,6 +2309,7 @@ class DiskMasher(tk.Tk):
                         out.append(t)
                         _append(t)
                     rc = 1 if cancel_event.is_set() else self._pty_run(copy_cmd, _collect, proc_store)
+                    after_d64copy(cancel_event)
                     text = "".join(out)
                     # d64copy exits 0 even after a [Fatal] (2026-11-25: writing to an erased
                     # disk stopped at once with 21,READ ERROR, exit 0), so judge by its
@@ -2210,6 +2498,7 @@ class DiskMasher(tk.Tk):
                 except OSError as e:
                     rc = 1
                     out.append(str(e))
+                after_d64copy(cancel_event)
                 text = "".join(out)
                 size = os.path.getsize(part) if os.path.exists(part) else 0
                 ok = (rc == 0 and size in IMAGE_FORMATS and not cancel_event.is_set()
