@@ -1,7 +1,7 @@
 """Parsing opencbm output. Samples are real output, from opencbm-tools.md and the drive log."""
 import unittest
 
-from _common import d
+from _common import d, make_d64
 
 
 class CbmDir(unittest.TestCase):
@@ -93,3 +93,25 @@ class SmallHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FormatHeader(unittest.TestCase):
+    """Pre-format before Write image uses the image's own name and ID (the ID goes into
+    every sector header, which the write can't change)."""
+
+    def header(self, name=b"GAMES", disk_id=b"2A"):
+        img = bytearray(make_d64())
+        off = d._blk(18, 0) * 256
+        img[off + 0x90:off + 0xA0] = name.ljust(16, b"\xa0")
+        img[off + 0xA2:off + 0xA4] = disk_id
+        return d.image_format_header(bytes(img))
+
+    def test_from_the_image(self):
+        self.assertEqual(self.header(), ("GAMES", "2A"))
+
+    def test_bytes_cbmforng_would_change_fall_back(self):
+        self.assertEqual(self.header(name=b"A,B", disk_id=b"\xc1\xc2"), ("DISK", "01"))
+        self.assertEqual(self.header(name=b"\x00"), ("DISK", "2A"))
+
+    def test_short_data(self):
+        self.assertEqual(d.image_format_header(b""), ("DISK", "01"))

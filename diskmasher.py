@@ -32,7 +32,7 @@ def _save_prefs(cfg):
         cfg.write(f)
 
 DRIVE = "8"   # the drive all operations use; changed only by DiskMasher._select_drive
-COLLECTION_ROOT = "/Volumes/ULTI" if os.path.exists("/Volumes/ULTI") else os.path.expanduser("~")
+START_DIR = os.path.expanduser("~")
 RELEVANT_EXTENSIONS = {".d64", ".d71", ".d81", ".prg", ".t64", ".tap", ".crt"}
 TYPE_EXT = {"PRG": ".prg", "SEQ": ".seq", "USR": ".usr", "REL": ".rel"}
 
@@ -122,6 +122,28 @@ def _read_bytes(path):
 def _blk(track, sector):
     """Block index of track/sector in a d64 image."""
     return sum(SECTORS_PER_TRACK[:track - 1]) + sector
+
+
+def _format_safe(raw):
+    """PETSCII bytes as text cbmforng can take: it uppercases its argument, so only
+    $20–$5A pass through unchanged (no comma). None if anything else is in there."""
+    if not raw or any(b < 0x20 or b > 0x5A or b == 0x2C for b in raw):
+        return None
+    return raw.decode("ascii")
+
+
+def image_format_header(data):
+    """The name and ID to pre-format with before writing a .d64/.d71 image: the image's
+    own, from 18/0. The write replaces the name anyway, but the ID also goes into every
+    sector header at format time and the write can't change that, so formatting with the
+    image's ID keeps headers and BAM matching, as on the original disk. Falls back to
+    "DISK"/"01" for bytes cbmforng can't reproduce."""
+    off = _blk(18, 0) * 256
+    if len(data) < off + 256:
+        return "DISK", "01"
+    bam = data[off:off + 256]
+    return (_format_safe(bam[0x90:0xA0].rstrip(b"\xa0")) or "DISK",
+            _format_safe(bam[0xA2:0xA4]) or "01")
 
 
 def analyze_image(data):
@@ -1012,7 +1034,7 @@ def _safe_filename(name):
 class FilesystemPane(ttk.Frame):
     def __init__(self, parent, **kw):
         super().__init__(parent, **kw)
-        self._path = COLLECTION_ROOT
+        self._path = START_DIR
         self._entries = []
         self._build()
         self._load()
@@ -2227,19 +2249,13 @@ class DiskMasher(tk.Tk):
         ttk.Checkbutton(fmt_frame, text="Format disk before writing",
                         variable=prefmt_var, command=lambda: _toggle()).grid(
             row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(fmt_frame, text="Name:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
-        dname_var = tk.StringVar(value=os.path.splitext(basename)[0].upper()[:16])
-        dname_entry = ttk.Entry(fmt_frame, textvariable=dname_var, width=18)
-        dname_entry.grid(row=1, column=1, sticky="w", padx=4)
-        ttk.Label(fmt_frame, text="ID:").grid(row=1, column=2, sticky="e", padx=(12, 4))
-        did_var = tk.StringVar(value="01")
-        did_entry = ttk.Entry(fmt_frame, textvariable=did_var, width=5)
-        did_entry.grid(row=1, column=3, sticky="w", padx=4)
+        dname, did = ("DISK", "01") if ext == ".d81" else image_format_header(_read_bytes(path))
+        hdr_lbl = ttk.Label(fmt_frame, text=f'With the image\'s name and ID: "{dname}" {did}',
+                            font=("Menlo", 10), anchor="w")
+        hdr_lbl.grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=4)
 
         def _toggle():
-            s = "normal" if prefmt_var.get() else "disabled"
-            dname_entry.configure(state=s)
-            did_entry.configure(state=s)
+            hdr_lbl.configure(state="normal" if prefmt_var.get() else "disabled")
         _toggle()
 
         btn_frame = ttk.Frame(dlg)
@@ -2247,8 +2263,6 @@ class DiskMasher(tk.Tk):
 
         def _do_write():
             do_fmt = prefmt_var.get()
-            dname  = dname_var.get().strip() or "DISK"
-            did    = did_var.get().strip() or "01"
             dlg.destroy()
             prog, pbar, close_btn, _append, proc_store, cancel_event = \
                 self._make_progress_window(f"Writing {basename}…")

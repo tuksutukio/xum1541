@@ -23,7 +23,7 @@ The "UI layout" and "lockup" sections moved here on 2026-10-15 from Claude's per
 - External tools: opencbm via Homebrew (`cbmctrl`, `cbmwrite`, `cbmread`, `d64copy`, `cbmforng`, `cbmformat`); VICE's
   `c1541` found at `/Applications/VICE*/bin/c1541` (image features are disabled when it's missing).
 - State outside the repo: prefs (geometry, sash, checkbox defaults) in `~/.config/diskmasher/prefs.ini`; single-instance
-  PID file `~/.diskmasher.pid`. The left pane starts at `/Volumes/ULTI` (Antti's collection drive) if mounted, else `~`.
+  PID file `~/.diskmasher.pid`. The left pane starts at `~`.
 
 ## Architecture
 
