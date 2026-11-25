@@ -6,7 +6,7 @@ A macOS GUI for mastering Commodore floppy disks via an xum1541 USB adapter. The
 
 Diskmasher is a split-pane tool: the left pane navigates your local filesystem, the right pane shows the directory of a connected CBM drive. You pick files from one side and push them to the other.
 
-It is **not** a general-purpose file manager. The left pane is intentionally read-light — you can create folders and disk images, but renaming, deleting, and managing local files is left to the Finder or your shell. The focus is on the CBM side of the workflow: writing floppies, reading them back, building images, and managing what's on a disk.
+It is **not** a general-purpose file manager. The left pane does only what a disk project needs without leaving the app: create a working folder or a disk image, and move test and intermediate files or folders to the Trash. Copying, moving, renaming and the rest of local file management stay with the Finder or your shell. The focus is on the CBM side of the workflow: writing floppies, reading them back, building images, and managing what's on a disk.
 
 ## Requirements
 
@@ -36,6 +36,7 @@ It is **not** a general-purpose file manager. The left pane is intentionally rea
 
 ### UI and workflow
 - Commander-style split pane with adjustable sash; geometry and sash position persisted across sessions
+- Left pane: `..` at the top of the list goes up one folder (so does ⌘↑) and selects the folder you came from; the File menu has New directory…, New image… and Move to Trash… (⌘⌫), which moves the selected files and folders to the macOS Trash after a confirmation that lists them, so Finder's Put Back works
 - Multi-select with Cmd-click (macOS convention) on both panes
 - Right pane: disk name, ID, file count, blocks free; selection line shows blocks and kB for selected files
 - Left pane: folder and file counts, total kB; selection line shows image format info and blocks free (queried live from the image via c1541) or file count and size for non-image selections
@@ -61,10 +62,6 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 
 ### Drive operations
 - Make a file the first one in the directory — mark a file in the right pane and move it to the first directory slot, so it loads with `LOAD"*",8` / `LOAD"*",8,1`; the other files either keep their order or get sorted (a choice in the dialog). Likely built on Sort's safe rewrite (`_rewrite_disk`) (requested 2026-11-25)
-
-### Local pane
-- Replace the "↑ Up" button with a `..` entry at the top of the file list (double-click goes up one directory)
-- A "File" button in the freed space, with Delete and New directory (New directory moves there from "New"; where New → Image… goes is open). Decided 2026-11-25, revising the earlier read-light rule: Delete is for clearing out test and intermediate files and folders, New directory for setting up a working folder for a disk project, both without leaving the app; copying, moving, renaming and the rest stay with the Finder. Delete moves to the macOS Trash. Update "What it is (and isn't)" when this lands
 
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)

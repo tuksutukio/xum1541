@@ -806,15 +806,16 @@ class FilesystemPane(ttk.Frame):
 
         nav = ttk.Frame(self)
         nav.pack(fill="x")
-        ttk.Button(nav, text="↑ Up",    command=self._go_up).pack(side="left", padx=4, pady=2)
+        file_btn  = ttk.Menubutton(nav, text="File")
+        file_menu = tk.Menu(file_btn, tearoff=False)
+        file_menu.add_command(label="New directory…", command=self._mkdir)
+        file_menu.add_command(label="New image…",     command=self._new_image,
+                              state="normal" if _C1541 else "disabled")
+        file_menu.add_separator()
+        file_menu.add_command(label="Move to Trash…", command=self._trash_selected)
+        file_btn["menu"] = file_menu
+        file_btn.pack(side="left", padx=4, pady=2)
         ttk.Button(nav, text="Refresh", command=self._load).pack(side="left", padx=2, pady=2)
-        new_btn  = ttk.Menubutton(nav, text="New")
-        new_menu = tk.Menu(new_btn, tearoff=False)
-        new_menu.add_command(label="Directory", command=self._mkdir)
-        new_menu.add_command(label="Image…",    command=self._new_image,
-                             state="normal" if _C1541 else "disabled")
-        new_btn["menu"] = new_menu
-        new_btn.pack(side="left", padx=2, pady=2)
         ttk.Button(nav, text="Write →", command=lambda: self.event_generate("<<WriteRequest>>")).pack(side="right", padx=4, pady=2)
 
         frame = ttk.Frame(self)
@@ -831,6 +832,8 @@ class FilesystemPane(ttk.Frame):
 
         self.lb.bind("<Double-1>",        self._on_double)
         self.lb.bind("<Return>",          self._on_double)
+        self.lb.bind("<Command-Up>",      lambda e: self._go_up())
+        self.lb.bind("<Command-BackSpace>", lambda e: self._trash_selected())
         self.lb.bind("<<ListboxSelect>>", lambda e: self._update_sel())
         self.lb.bind("<Button-1>",        lambda e: self.after(0, lambda: _deselect_if_empty(self.lb, e.y, self._update_sel)))
         _bind_mac_multiselect(self.lb)
@@ -890,10 +893,16 @@ class FilesystemPane(ttk.Frame):
                 pass
         threading.Thread(target=_run, daemon=True).start()
 
-    def _load(self):
+    def _load(self, select_name=None):
+        """List the current folder. A `..` entry comes first (except at /); select_name,
+        if given, is selected and scrolled into view (the folder we just came up from)."""
         self._hdr.set(self._path)
         self.lb.delete(0, tk.END)
         self._entries = []
+        parent = os.path.dirname(self._path)
+        if parent != self._path:
+            self._entries.append(("..", True, parent))
+            self.lb.insert(tk.END, "  ../")
         try:
             raw = sorted(os.scandir(self._path),
                          key=lambda e: (not e.is_dir(), e.name.lower()))
@@ -921,13 +930,21 @@ class FilesystemPane(ttk.Frame):
         if files_only: parts.append(f"{len(files_only)} file{'s' if len(files_only) > 1 else ''}  ·  {total_kb} kB")
         self._stats_var.set("  ·  ".join(parts) if parts else "")
         self._sel_var.set("")
+        if select_name is not None:
+            for i, (n, _, _) in enumerate(self._entries):
+                if n == select_name and n != "..":
+                    self.lb.selection_set(i)
+                    self.lb.see(i)
+                    break
 
     def _on_double(self, _event):
         sel = self.lb.curselection()
         if not sel:
             return
         name, is_dir, path = self._entries[sel[0]]
-        if is_dir:
+        if name == "..":
+            self._go_up()
+        elif is_dir:
             self._path = path
             self._load()
         elif _C1541 and os.path.splitext(name)[1].lower() in {".d64", ".d71", ".d81"}:
@@ -980,8 +997,60 @@ class FilesystemPane(ttk.Frame):
     def _go_up(self):
         parent = os.path.dirname(self._path)
         if parent != self._path:
+            came_from = os.path.basename(self._path)
             self._path = parent
-            self._load()
+            self._load(select_name=came_from)
+
+    def _trash_selected(self):
+        """Move the selected files and folders to the macOS Trash (Finder's Put Back works).
+        For clearing out test and intermediate files without leaving the app; copying,
+        moving and renaming stay with the Finder (README, "Local pane")."""
+        items = [(n, d, p) for i in self.lb.curselection()
+                 for n, d, p in [self._entries[i]] if n != ".."]
+        if not items:
+            messagebox.showinfo("Move to Trash", "Select the files or folders to move first.")
+            return
+        lines = []
+        for n, d, p in items[:12]:
+            if d:
+                try:
+                    k = sum(len(fs) + len(ds) for _, ds, fs in os.walk(p))
+                except OSError:
+                    k = 0
+                lines.append(f"  {n}/" + (f"  ({k} item{'s' if k != 1 else ''} inside)" if k else "  (empty)"))
+            else:
+                lines.append(f"  {n}")
+        if len(items) > 12:
+            lines.append(f"  … and {len(items) - 12} more")
+        what = (f'"{items[0][0]}"' if len(items) == 1 else f"these {len(items)} items")
+        if not messagebox.askyesno("Move to Trash",
+                f"Move {what} to the Trash?\n\n" + "\n".join(lines),
+                icon="warning", default="no"):
+            return
+        paths = [p for _, _, p in items]
+        try:
+            if os.path.exists("/usr/bin/trash"):
+                r = subprocess.run(["/usr/bin/trash", *paths],
+                                   capture_output=True, text=True, timeout=60)
+            else:   # before macOS 15: ask the Finder
+                script = ("on run argv\n tell application \"Finder\"\n"
+                          "  repeat with p in argv\n delete (POSIX file p as alias)\n end repeat\n"
+                          " end tell\nend run")
+                r = subprocess.run(["osascript", "-e", script, *paths],
+                                   capture_output=True, text=True, timeout=60)
+            failed = [p for p in paths if os.path.lexists(p)]
+        except Exception as e:
+            r, failed = None, paths
+            err = str(e)
+        else:
+            err = (r.stderr or r.stdout or "").strip()
+        self._load()
+        if failed:
+            messagebox.showerror("Move to Trash",
+                "Couldn't move to the Trash:\n" +
+                "\n".join("  " + os.path.basename(p) for p in failed[:12]) +
+                (f"\n\n{err}" if err else "") +
+                "\n\nNothing was deleted for good.")
 
     def _mkdir(self):
         dlg = tk.Toplevel(self)
