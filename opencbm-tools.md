@@ -57,6 +57,13 @@ Key options:
   4 bytes each: free count + bitmap); the drive's DOS still reports **664 blocks free**, so a directory listing
   never reveals a 40-track disk.
 - Standard DOS refuses a file whose chain reaches track 36: `67,ILLEGAL TRACK OR SECTOR,36,00`.
+- A decayed 40-track disk (2026-11-25, spare 1571 at device 9): `-s 36 -e 36 -r 0` found every sector header but
+  only 8 of 17 sectors read; the rest gave `read error: 24/xx: 5` (data checksum), then `[Warning] giving up...`
+  and `8 blocks copied.`, **exit 0**. So "N blocks copied" with N below the expected count is a partial read, not
+  a failure of the tool; the bad sectors are in the error table.
+- The disk check on that disk sometimes took 30+ s in the app (one time track 36 timed out), but never from the
+  command line: not after a directory listing, not after a fresh insert (8–10 s each, 2026-11-25). Unexplained;
+  diskmasher's drive command log is there to catch it.
 - On a disk never formatted past track 35, `d64copy -s 36 -e 36 -r 0` gives up quickly instead of hanging: diskmasher's
   whole disk check (reset + tracks 18 and 36) took about 7 s, as on a 40-track disk, and reported a standard
   35-track disk. Write image then refused a 40-track image without pre-format, as intended.

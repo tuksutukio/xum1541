@@ -47,6 +47,23 @@ to disk (`FB_PATHS` maps platform → files).
 - **Sort and FB-ify share `_rewrite_disk`:** check, full read + analysis, read every file, and only then scratch
   and rewrite. Anything risky stops it before the disk is touched; a failure after the scratch moves the read
   files to a `*_rescue` folder next to the image and keeps the image.
+- **Drive command log:** every opencbm command (via `_run_bounded`, `stream_cmd`, `cbm_dir`, `cbm_detect`,
+  `cbm_read_file`, `cbm_write_file`) is logged to `~/Library/Logs/diskmasher.log` with duration, outcome and last
+  output lines; also Cancel, process stops and disk-check results. Read it first when a drive misbehaves.
+- **Track 36 in `probe_disk`:** all 17 sectors OK = present; none = 35-track disk; some = `t36_partial`, a decayed
+  40-track disk: reads use 40 tracks, Write image without pre-format refuses.
+- **Erase (`erase_tracks`, drive code `drive/erase.s`):** the only code of ours that runs in the drive. Loaded to
+  buffer 2 (`$0500`) with `cbmctrl upload` and run as an execute job (`$E0`) per track, after a bump job (`$C0`) so the
+  controller knows the head position; the job slot is polled with `cbmctrl download`. A 1571 is put in 1541 mode first
+  (`U0>M0`), because the routine exits through the 1541-mode ROM's `$F969`. `ERASE_CODE` holds the assembled bytes:
+  change `erase.s` and the bytes together.
+  Write protect is honoured (tested 2026-11-25, drive 9), but the 1571's sensor is optical: clear tape over the notch
+  lets the light through, so the drive (DOS writes too) sees the disk as unprotected. Use opaque tape. The sense bit
+  is `$1C00` bit 4 (0 = protected), readable with `cbmctrl download <unit> 0x1C00 1`.
+- **74,DRIVE NOT READY can be the head, not the disk:** after a reset or disk change the DOS checks the drive by reading
+  one header on whatever track the head is on (1541 ROM `LC63D` → `LD00E`); on a blank or unreadable track it sets a
+  not-ready flag and answers 74 until `I`, even once the head is back on a good track (found 2026-11-25 after a
+  cancelled erase). `recover_head()` (bump, seek 18, `I`) fixes it; `cbm_dir()` tries it once on a 74.
 - **The selected drive is the module global `DRIVE`**, read at call time everywhere (never bind it as a default
   argument). Only `DiskMasher._select_drive` changes it (Drive menu, after Detect; saved in prefs), and it refuses
   while an operation window is open.

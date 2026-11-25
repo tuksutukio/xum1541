@@ -77,6 +77,36 @@ IMAGE_FORMATS = {
     819200: ("d81 (1581)",              ".d81", False, False),
 }
 
+# --- Drive command log ---
+# Every opencbm command goes into ~/Library/Logs/diskmasher.log with its duration, how it
+# ended and its last output lines, to catch intermittent faults (2026-11-25: a track-36
+# read that sometimes hung for 30 s and couldn't be reproduced from the command line).
+
+LOG_FILE  = os.path.expanduser("~/Library/Logs/diskmasher.log")
+_log_lock = threading.Lock()
+
+
+def log_event(text):
+    """Append one timestamped line; never raises. Rotates to .1 past 1 MB."""
+    try:
+        with _log_lock:
+            os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 1_000_000:
+                os.replace(LOG_FILE, LOG_FILE + ".1")
+            with open(LOG_FILE, "a") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.rstrip() + "\n")
+    except Exception:
+        pass
+
+
+def log_cmd(cmd, started, outcome, output=""):
+    """Log a finished command: duration, outcome (exit code, 'HUNG', 'stopped'…), last lines."""
+    lines = [l.strip() for l in (output or "").replace("\r", "\n").splitlines() if l.strip()]
+    tail  = " | ".join(lines[-3:])
+    log_event(f"{' '.join(map(str, cmd))}  [{time.monotonic() - started:.1f}s, {outcome}]"
+              + (f"  {tail}" if tail else ""))
+
+
 # --- Disk image analysis (pure functions on image bytes; no drive access) ---
 
 SECTORS_PER_TRACK = [21] * 17 + [19] * 7 + [18] * 6 + [17] * 10   # tracks 1–40 (1541 zones)
@@ -233,6 +263,11 @@ def stream_cmd(cmd, on_text, proc_store=None):
     on_text(chunk) from this thread as output arrives. Returns the exit code.
     Call from a worker thread; proc_store[0] holds the process while it runs."""
     import select as _select
+    started, tail = time.monotonic(), []
+    def _on(t):
+        tail.append(t)
+        del tail[:-20]
+        on_text(t)
     master_fd, slave_fd = pty.openpty()
     try:
         proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd,
@@ -249,13 +284,14 @@ def stream_cmd(cmd, on_text, proc_store=None):
                     chunk = os.read(master_fd, 4096)
                     if not chunk:
                         break
-                    on_text(chunk.decode("utf-8", errors="replace")
-                            .replace("\r\n", "\n").replace("\r", "\n"))
+                    _on(chunk.decode("utf-8", errors="replace")
+                        .replace("\r\n", "\n").replace("\r", "\n"))
                 elif proc.poll() is not None:
                     break
             except OSError:
                 break
         proc.wait()
+        log_cmd(cmd, started, f"exit {proc.returncode}", "".join(tail))
         return proc.returncode
     finally:
         if proc_store is not None:
@@ -269,11 +305,23 @@ def stream_cmd(cmd, on_text, proc_store=None):
 _D64COPY_PROGRESS = re.compile(r'(\d+):\s*\S*\s+(\d+)%\s+(\d+)/(\d+)')
 
 
-def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_event=None):
+def blocks_copied(text, tracks):
+    """(copied, expected) from d64copy's 'N blocks copied.'; copied None if absent.
+    Fewer than expected means sectors d64copy gave up on ('giving up...', still exit 0);
+    they are marked in the image's error table."""
+    m = None
+    for m in re.finditer(r'(\d+) blocks copied', text or ""):
+        pass
+    return (int(m.group(1)) if m else None), sum(SECTORS_PER_TRACK[:tracks])
+
+
+def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_event=None,
+                      stats=None):
     """Read the whole disk with d64copy (35 or 40 tracks) into `path`.
     on_progress(track, fraction) is called from this thread. Returns None when the read is
     complete, else an error string. d64copy creates the file at full size before reading,
-    so completeness is judged from its output ('N blocks copied.') and exit code."""
+    so completeness is judged from its output ('N blocks copied.') and exit code.
+    If `stats` is a dict, it gets 'copied' and 'expected' block counts."""
     cmd = ["d64copy"] + (["--end-track", "40"] if tracks == 40 else []) + [DRIVE, path]
     out = []
     def _text(t):
@@ -293,7 +341,10 @@ def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_ev
         return str(e)
     text = "".join(out)
     size = os.path.getsize(path) if os.path.exists(path) else 0
-    if rc == 0 and size in IMAGE_FORMATS and re.search(r'\d+ blocks copied', text):
+    copied, expected = blocks_copied(text, tracks)
+    if stats is not None:
+        stats.update(copied=copied, expected=expected)
+    if rc == 0 and size in IMAGE_FORMATS and copied is not None:
         return None
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     return lines[-1] if lines else f"d64copy exit code {rc}"
@@ -304,12 +355,16 @@ def probe_disk(proc_store=None, cancel_event=None, track18=True):
 
     Reads track 18 (BAM: name, double-sided flag, extended BAM) and track 36 (is the disk
     formatted beyond 35 tracks, and does that area hold data?). Returns a dict with error,
-    double_sided, ext_bam, disk_name, t36_readable (some sector read OK), t36_data,
-    t36_checked (False if the track-36 read timed out). On a never-formatted track 36
+    double_sided, ext_bam, disk_name, t36_checked (False if the track-36 read timed out),
+    t36_ok (sectors of 17 that read OK), t36_readable (all 17 OK: formatted and sound),
+    t36_partial (some but not all: formatted once, now damaged; seen 2026-11-25 on a
+    decayed 40-track disk, 8 of 17 OK, the rest checksum errors), t36_data. On a never-formatted track 36
     d64copy gives up quickly (whole check about 7 s on a 1571, 2026-11-25); the 30 s
     watchdog is only a safety net."""
     res = {"error": None, "double_sided": False, "ext_bam": None, "disk_name": "",
-           "t36_readable": False, "t36_data": False, "t36_checked": False}
+           "t36_readable": False, "t36_partial": False, "t36_ok": 0,
+           "t36_data": False, "t36_checked": False}
+    log_event(f"--- disk check on drive {DRIVE}")
     reset_and_settle()
     if cancel_event is not None and cancel_event.is_set():
         res["error"] = "cancelled"
@@ -346,20 +401,155 @@ def probe_disk(proc_store=None, cancel_event=None, track18=True):
         if len(data) == 196608 and r[0] == 0 and re.search(r'\d+ blocks copied', r[1]):
             # No error table: d64copy left it out because nothing failed (seen on full
             # reads; single-track reads have so far always included one).
-            res["t36_readable"] = True
+            res["t36_readable"], res["t36_ok"] = True, 17
             b = data[_blk(36, 0) * 256:_blk(37, 0) * 256]
             res["t36_data"] = any(any(b[i:i + 256]) and not (b[i] == 0x4B and not any(
                 x != 1 for x in b[i + 1:i + 256])) for i in range(0, len(b), 256))
         elif len(data) == 197376:                    # 40 tracks + error bytes
             codes = [data[196608 + _blk(36, s)] for s in range(17)]
-            res["t36_readable"] = any(c == 1 for c in codes)
+            res["t36_ok"] = sum(1 for c in codes if c == 1)
+            res["t36_readable"] = res["t36_ok"] == 17
+            res["t36_partial"] = 0 < res["t36_ok"] < 17
             for s in range(17):
                 if codes[s] != 1:
                     continue
                 b = data[_blk(36, s) * 256:_blk(36, s) * 256 + 256]
                 if any(b) and not (b[0] == 0x4B and not any(x != 1 for x in b[1:])):
                     res["t36_data"] = True
+    log_event(f"--- disk check result: {res}")
     return res
+
+
+# Drive code from drive/erase.s (built with cl65 -t none --start-addr 0x500); keep the two in
+# step. Run as an execute job ($E0) from buffer 2, it overwrites one whole track with
+# sync-free bytes and reports $01 OK or $08 write protected in job slot $02.
+ERASE_CODE = bytes.fromhex(
+    "ad001c2910d005a9084c69f9a9558d011ca9ff8d031cad0c1c291f09c08d0c1c"
+    "a220a000a95550feb88d011cc8d0f7cad0f450feb8ad0c1c09e08d0c1ca9008d"
+    "031ca9014c69f9")
+_JOB2, _HDR2, _BUF2 = 0x0002, 0x000A, 0x0500     # job slot, header table, buffer #2
+
+
+def _drive_mem_write(addr, data, tmp, proc_store=None, cancel_event=None):
+    if cancel_event is not None and cancel_event.is_set():
+        return False      # the cancel sequence owns the bus now
+    path = os.path.join(tmp, "upload.bin")
+    with open(path, "wb") as f:
+        f.write(data)
+    r = _run_bounded(["cbmctrl", "upload", DRIVE, hex(addr), path], 10, proc_store)
+    return r is not None and r[0] == 0
+
+
+def _drive_mem_read(addr, count, tmp, proc_store=None, cancel_event=None):
+    if cancel_event is not None and cancel_event.is_set():
+        return None
+    path = os.path.join(tmp, "download.bin")
+    if os.path.exists(path):
+        os.remove(path)
+    r = _run_bounded(["cbmctrl", "download", DRIVE, hex(addr), str(count), path], 10,
+                     proc_store)
+    if r is None or r[0] != 0 or not os.path.exists(path):
+        return None
+    data = open(path, "rb").read()
+    return data if len(data) == count else None
+
+
+def _drive_job(code, tmp, proc_store=None, cancel_event=None, timeout=20):
+    """Put a job in slot 2 and wait for the controller to finish it. Returns the result
+    byte ($01 = OK), or None if the drive didn't answer or the job didn't finish."""
+    if not _drive_mem_write(_JOB2, bytes([code]), tmp, proc_store, cancel_event):
+        return None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        b = _drive_mem_read(_JOB2, 1, tmp, proc_store, cancel_event)
+        if b is None:
+            return None
+        if b[0] < 0x80:
+            return b[0]
+        if cancel_event is not None and cancel_event.is_set():
+            return None
+        time.sleep(0.1)
+    return None
+
+
+def recover_head(bump=True):
+    """Get the drive out of 74,DRIVE NOT READY caused by where the head is, not by the disk.
+
+    After a reset or disk change the DOS checks the drive by reading one sector header on
+    whatever track the head is on (1541 ROM LC63D → LD00E, a seek job). If that track is
+    unreadable (erased, unformatted, beyond track 35 on a 35-track disk, or the head lost
+    between tracks) it sets its not-ready flag and answers 74 to everything until an `I`
+    or a disk change, even once the head is back on a good track (found 2026-11-25 after a
+    cancelled erase left the head on a blank track 12; a seek to 18 alone didn't help, `I`
+    did). So: bump (head to track 1, position known), seek track 18, `I`. Returns the
+    drive status text. Uses job slot 2 only; writes nothing to the disk."""
+    with tempfile.TemporaryDirectory() as tmp:
+        if bump and _drive_mem_write(_HDR2, bytes([1, 0]), tmp):
+            _drive_job(0xC0, tmp)
+        if _drive_mem_write(_HDR2, bytes([18, 0]), tmp):
+            _drive_job(0xB0, tmp)
+    _run_bounded(["cbmctrl", "command", DRIVE, "I"], 10)
+    return drive_status()[1]
+
+
+def erase_tracks(tracks, on_progress=None, proc_store=None, cancel_event=None):
+    """Erase the given tracks (1–40) by writing sync-free bytes over each one, so the drive
+    reads them as never formatted. Bumps the head first, so the controller knows where it
+    is whatever is (or isn't) on the disk. Returns (ok, message).
+
+    A 1571 is put in 1541 mode first (U0>M0, drive-1571-users-guide-1985 p.13): the drive
+    code relies on the 1541-mode ROM's job exit at $F969."""
+    log_event(f"--- erase tracks {tracks[0]}–{tracks[-1]} on drive {DRIVE}")
+    reset_and_settle()
+    if cancel_event is not None and cancel_event.is_set():
+        return False, "cancelled"
+    det = _run_bounded(["cbmctrl", "detect"], 10)
+    model = dict(parse_detect(det[1])).get(DRIVE, "") if det and det[0] == 0 else ""
+    if not model:
+        return False, f"drive {DRIVE} does not answer"
+    if not re.match(r'15(41|70|71)', model):
+        return False, f"erasing is only implemented for 1541/1570/1571 drives, not {model}"
+    if model.startswith(("1570", "1571")):
+        _run_bounded(["cbmctrl", "command", DRIVE, "U0>M0"], 10)
+        drive_status()
+    with tempfile.TemporaryDirectory() as tmp:
+        if cancel_event is not None and cancel_event.is_set():
+            return False, "cancelled"
+        if not _drive_mem_write(_BUF2, ERASE_CODE, tmp, proc_store, cancel_event) or \
+                _drive_mem_read(_BUF2, len(ERASE_CODE), tmp, proc_store, cancel_event) != ERASE_CODE:
+            return False, "could not load the erase routine into the drive"
+        # Bump: head to track 1, a known position (the ROM sets its current track to 1;
+        # LF37C in the 1541 ROM). The controller reads the slot's header track before
+        # any job, so give it a valid one.
+        r = (_drive_job(0xC0, tmp, proc_store, cancel_event)
+             if _drive_mem_write(_HDR2, bytes([1, 0]), tmp, proc_store, cancel_event) else None)
+        if r != 0x01:
+            return False, ("cancelled" if cancel_event is not None and cancel_event.is_set()
+                           else f"head bump failed (job result {r})")
+        for i, t in enumerate(tracks):
+            if cancel_event is not None and cancel_event.is_set():
+                return False, "cancelled"
+            if on_progress:
+                on_progress(t, i / len(tracks))
+            if not _drive_mem_write(_HDR2, bytes([t, 0]), tmp, proc_store, cancel_event):
+                return False, f"drive stopped answering at track {t}"
+            r = _drive_job(0xE0, tmp, proc_store, cancel_event)
+            if r == 0x08:
+                return False, "the disk is write protected (nothing was erased)" if i == 0 else \
+                              f"write protect at track {t}"
+            if r != 0x01:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False, "cancelled"
+                return False, f"erasing track {t} failed (job result {r})"
+        if on_progress:
+            on_progress(tracks[-1], 1.0)
+        if cancel_event is not None and cancel_event.is_set():
+            return False, "cancelled"
+    # Park the head on track 18 and re-read the BAM (the drive's copy is stale). A plain
+    # reset would leave the head on the last, now blank, track: 74 until a disk change.
+    recover_head(bump=False)
+    log_event("--- erase done")
+    return True, "done"
 
 
 def _bind_mac_multiselect(lb):
@@ -383,6 +573,7 @@ def _stop_proc(proc, grace=3.0):
     gentle signal always gets its chance first."""
     if proc is None or proc.poll() is not None:
         return
+    log_event(f"stopping pid {proc.pid} ({' '.join(map(str, proc.args)) if isinstance(proc.args, list) else proc.args}) with SIGTERM")
     try:
         proc.terminate()
     except Exception:
@@ -392,6 +583,7 @@ def _stop_proc(proc, grace=3.0):
         if proc.poll() is not None:
             return
         time.sleep(0.1)
+    log_event(f"pid {proc.pid} ignored SIGTERM for {grace:.0f}s: SIGKILL")
     try:
         proc.kill()
     except Exception:
@@ -402,6 +594,7 @@ def _run_bounded(cmd, timeout, proc_store=None):
     """Run a short command. Returns (returncode, output), or None if it hung past `timeout`.
     Unlike subprocess.run(timeout=…), a hung process is stopped with _stop_proc, not SIGKILL.
     With proc_store, the process sits in proc_store[0] while it runs, so Cancel can stop it."""
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace")
@@ -411,13 +604,16 @@ def _run_bounded(cmd, timeout, proc_store=None):
         proc_store[0] = proc
     try:
         out, _ = proc.communicate(timeout=timeout)
+        log_cmd(cmd, started, f"exit {proc.returncode}", out)
         return proc.returncode, out
     except subprocess.TimeoutExpired:
         _stop_proc(proc)
+        out = ""
         try:
-            proc.communicate(timeout=2)
+            out = proc.communicate(timeout=2)[0] or ""
         except Exception:
             pass
+        log_cmd(cmd, started, f"HUNG past {timeout}s, stopped", out)
         return None
     finally:
         if proc_store is not None:
@@ -430,8 +626,10 @@ def parse_detect(text):
 
 
 def cbm_detect():
+    started = time.monotonic()
     try:
         r = subprocess.run(["cbmctrl", "detect"], capture_output=True, text=True, timeout=5)
+        log_cmd(["cbmctrl", "detect"], started, f"exit {r.returncode}", r.stdout + r.stderr)
         return r.stdout.strip()
     except Exception as e:
         return f"Error: {e}"
@@ -450,13 +648,28 @@ def drive_status(drive=None, timeout=120):
     return (int(m.group(1)) if m else None), text
 
 
-def cbm_dir(drive=None):
+def _cbm_dir_once(drive):
+    started = time.monotonic()
     try:
-        r = subprocess.run(["cbmctrl", "dir", drive or DRIVE],
+        r = subprocess.run(["cbmctrl", "dir", drive],
                            capture_output=True, text=True, timeout=30)
+        log_cmd(["cbmctrl", "dir", drive], started, f"exit {r.returncode}",
+                (r.stdout or "")[-200:] + (r.stderr or ""))
         return r.stdout.strip()
     except Exception as e:
         return f"Error: {e}"
+
+
+def cbm_dir(drive=None):
+    """Directory listing. On 74,DRIVE NOT READY, tries recover_head() once and reads again:
+    the DOS says 74 when the head sits on an unreadable track (see recover_head)."""
+    drive = drive or DRIVE
+    out = _cbm_dir_once(drive)
+    if out.startswith("74,") and drive == DRIVE:
+        log_event(f"--- 74 on drive {drive}: bump, seek track 18, initialise, read again")
+        recover_head()
+        out = _cbm_dir_once(drive)
+    return out
 
 
 def parse_cbm_dir(raw):
@@ -494,6 +707,7 @@ def _opencbm_error(output):
 def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None):
     """Read a single file from CBM drive into dest_dir. Returns error string or None.
     Success means: no failure line in cbmread's output, and the file it names exists."""
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(
             ["cbmread", drive, cbm_name],
@@ -506,6 +720,7 @@ def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None):
         finally:
             if proc_store is not None:
                 proc_store[0] = None
+        log_cmd(["cbmread", drive, cbm_name], started, f"exit {proc.returncode}", out)
         err = _opencbm_error(out)
         if err:
             return err
@@ -525,6 +740,7 @@ def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None):
 def cbm_write_file(drive, local_path, cbm_name=None, proc_store=None):
     """Write a local file to CBM drive, optionally with a specific CBM filename."""
     cmd = ["cbmwrite", "-o", cbm_name, drive, local_path] if cbm_name else ["cbmwrite", drive, local_path]
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace")
@@ -535,6 +751,7 @@ def cbm_write_file(drive, local_path, cbm_name=None, proc_store=None):
         finally:
             if proc_store is not None:
                 proc_store[0] = None
+        log_cmd(cmd, started, f"exit {proc.returncode}", out)
         err = _opencbm_error(out)
         if err:
             return err
@@ -954,6 +1171,8 @@ class CbmDirPane(ttk.Frame):
         disk_menu.add_command(label="Format…",  command=lambda: self.event_generate("<<FormatRequest>>"))
         disk_menu.add_command(label="FB-ify…",  command=lambda: self.event_generate("<<FBifyRequest>>"))
         disk_menu.add_command(label="Sort…",    command=lambda: self.event_generate("<<SortRequest>>"))
+        disk_menu.add_separator()
+        disk_menu.add_command(label="Erase…",   command=lambda: self.event_generate("<<EraseRequest>>"))
         disk_btn["menu"] = disk_menu
         disk_btn.pack(side="right", padx=2, pady=2)
 
@@ -1127,6 +1346,7 @@ class DiskMasher(tk.Tk):
         self.cbm_pane.bind("<<FormatRequest>>", lambda e: self._format_disk())
         self.cbm_pane.bind("<<FBifyRequest>>",    lambda e: self._fbify_disk())
         self.cbm_pane.bind("<<SortRequest>>",     lambda e: self._sort_disk())
+        self.cbm_pane.bind("<<EraseRequest>>",    lambda e: self._erase_disk())
         self.cbm_pane.bind("<<ReadImageRequest>>",   lambda e: self._read_image_from_cbm())
         self.cbm_pane.bind("<<ReadToImageRequest>>", lambda e: self._read_to_image())
         self.cbm_pane.bind("<<ScratchRequest>>",     lambda e: self._scratch_files())
@@ -1262,6 +1482,7 @@ class DiskMasher(tk.Tk):
         it finishes. Then: SIGTERM → up to 3 s → SIGKILL, `cbmctrl reset`, a settle pause,
         and a `cbmctrl detect` probe that tells three outcomes apart."""
         cancel_event.set()
+        log_event("--- Cancel pressed")
         self._set_status("Cancelling — stopping transfer…")
 
         def _run():
@@ -1696,6 +1917,12 @@ class DiskMasher(tk.Tk):
                             "\nCouldn't check track 36 (the read timed out). Write again with "
                             "'Pre-format' ticked (it uses cbmforng -x).\n"))
                         ok = False
+                    elif pr["t36_partial"]:
+                        n36 = pr["t36_ok"]
+                        self.after(0, lambda: _append(
+                            f"\nTrack 36 is damaged ({n36} of 17 sectors readable). Write again "
+                            "with 'Pre-format' ticked (it uses cbmforng -x).\n"))
+                        ok = False
                     elif not pr["t36_readable"]:
                         self.after(0, lambda: _append(
                             "\nThis disk isn't formatted beyond track 35. Write again with "
@@ -1714,8 +1941,29 @@ class DiskMasher(tk.Tk):
                         copy_cmd = ["d64copy", path, DRIVE]
                     self.after(0, lambda: _append(f"\nCopying image…\n"))
                     reset_and_settle()
-                    rc = 1 if cancel_event.is_set() else self._pty_run(copy_cmd, _append, proc_store)
-                    ok = rc == 0 and not cancel_event.is_set()
+                    out = []
+                    def _collect(t):
+                        out.append(t)
+                        _append(t)
+                    rc = 1 if cancel_event.is_set() else self._pty_run(copy_cmd, _collect, proc_store)
+                    text = "".join(out)
+                    # d64copy exits 0 even after a [Fatal] (2026-11-25: writing to an erased
+                    # disk stopped at once with 21,READ ERROR, exit 0), so judge by its
+                    # "N blocks copied." line too.
+                    ok = rc == 0 and not cancel_event.is_set() and "[Fatal]" not in text
+                    if ok and copy_cmd[0] == "d64copy" and not is_d71:
+                        copied, expected = blocks_copied(text, 40 if is_40track else 35)
+                        if copied != expected:
+                            ok = False
+                            self.after(0, lambda: _append(
+                                f"\nOnly {copied or 0} of {expected} blocks were written.\n"))
+                    elif ok and not re.search(r'\d+ blocks copied', text):
+                        ok = False
+                    if not ok and not cancel_event.is_set() and not do_fmt and \
+                            re.search(r'\b2[0-3],READ ERROR|\b74,', text):
+                        self.after(0, lambda: _append(
+                            "\nThe disk doesn't look formatted. Write again with "
+                            "'Pre-format' ticked.\n"))
 
                 def done():
                     pbar.stop()
@@ -1817,6 +2065,11 @@ class DiskMasher(tk.Tk):
                        "this is a 40-track disk. Tick 40-track to be safe: on a 35-track disk "
                        "the extra tracks just read as errors.")
                 warn = not ext40_var.get()
+            elif probe["t36_partial"]:
+                msg = (f"Track 36 is formatted but partly unreadable ({probe['t36_ok']} of 17 "
+                       "sectors read): a 40-track disk that has decayed. Reading 40 tracks keeps "
+                       "what survives; the errors are recorded in the image.")
+                warn = not ext40_var.get()
             elif probe["t36_readable"]:
                 what = "holds data" if probe["t36_data"] else "is formatted but empty"
                 msg = f"Track 36 {what}: this is a 40-track disk."
@@ -1837,7 +2090,7 @@ class DiskMasher(tk.Tk):
             probe.update(res)
             check_bar.stop()
             check_bar.pack_forget()
-            ext40_var.set(bool(res["t36_readable"]))
+            ext40_var.set(bool(res["t36_readable"] or res["t36_partial"]))
             read_btn.configure(state="disabled" if res["double_sided"] and not res["error"]
                                else "normal")
             _explain()
@@ -1888,10 +2141,14 @@ class DiskMasher(tk.Tk):
                 report, kept = [], None
                 if ok:
                     os.replace(part, out_path)
+                    copied, expected = blocks_copied(text, 40 if is_40 else 35)
+                    if copied is not None and copied < expected:
+                        report.append(f"{expected - copied} of {expected} blocks couldn't be "
+                                      "read (marked in the image's error table).")
                     try:
-                        report = describe_image(analyze_image(open(out_path, "rb").read()))
+                        report += describe_image(analyze_image(open(out_path, "rb").read()))
                     except (ValueError, OSError) as e:
-                        report = [f"(no analysis: {e})"]
+                        report.append(f"(no analysis: {e})")
                 elif os.path.exists(part):
                     # d64copy fills the file to full size up front, so a partial read
                     # looks complete. Keep it (a failing disk may not read again) but
@@ -2134,6 +2391,99 @@ class DiskMasher(tk.Tk):
 
         dlg.wait_window()
 
+    def _erase_disk(self):
+        """Disk → Erase…: wipe tracks 36–40 (a 40-track disk becomes a clean 35-track one) or
+        the whole disk (1–40, as if never formatted). Drive code: erase_tracks()."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Erase disk")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        name = self.cbm_pane.disk_name.strip()
+        ttk.Label(dlg, padding=(14, 12, 14, 4), justify="left",
+                  text=f"Drive {DRIVE}" + (f', disk "{name}"' if name else "") + ".\n"
+                       "Erasing overwrites whole tracks: nothing on them can be read back.").grid(
+            row=0, column=0, sticky="w")
+        what = tk.StringVar(value="extra")
+        box = ttk.LabelFrame(dlg, text="Erase", padding=(8, 4))
+        box.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        ttk.Radiobutton(box, variable=what, value="extra",
+                        text="Tracks 36–40 only").grid(row=0, column=0, sticky="w")
+        ttk.Label(box, foreground="gray", justify="left",
+                  text="Makes a 40-track disk a clean 35-track one. Files on tracks 1–35\n"
+                       "stay; anything reaching into tracks 36–40 is lost.").grid(
+            row=1, column=0, sticky="w", padx=(22, 0), pady=(0, 6))
+        ttk.Radiobutton(box, variable=what, value="all",
+                        text="Whole disk (tracks 1–40)").grid(row=2, column=0, sticky="w")
+        ttk.Label(box, foreground="gray", justify="left",
+                  text="Everything is gone and the disk reads as never formatted.\n"
+                       "Format it before use.").grid(
+            row=3, column=0, sticky="w", padx=(22, 0), pady=(0, 4))
+
+        def _go():
+            tracks = list(range(36, 41)) if what.get() == "extra" else list(range(1, 41))
+            label = "tracks 36–40" if tracks[0] == 36 else "the whole disk"
+            if not messagebox.askyesno("Erase disk",
+                    f"Erase {label} on drive {DRIVE}" + (f' ("{name}")' if name else "") +
+                    "?\n\nThis cannot be undone.", icon="warning", parent=dlg):
+                return
+            dlg.destroy()
+            self._run_erase(tracks, label)
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=2, column=0, pady=(6, 10))
+        ttk.Button(btns, text="Erase…", command=_go).pack(side="left", padx=8)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
+        dlg.wait_window()
+
+    def _run_erase(self, tracks, label):
+        set_msg, close, cancel_event, proc_store = self._make_task_dialog(
+            "Erasing", f"Erasing {label}…")
+        self._set_status(f"Erasing {label} on drive {DRIVE}…")
+
+        def run():
+            ok, msg = erase_tracks(
+                tracks, lambda t, f: set_msg(f"Erasing track {t}…", f,
+                                             f"Tracks {tracks[0]}–{tracks[-1]}"),
+                proc_store, cancel_event)
+            check = None
+            if ok and not cancel_event.is_set():
+                set_msg("Checking the result…", None, "")
+                check = probe_disk(proc_store, cancel_event, track18=tracks[0] == 36)
+
+            def done():
+                close()
+                if cancel_event.is_set():
+                    # _cancel_and_recover resets the bus and refreshes the pane.
+                    messagebox.showinfo("Erase cancelled",
+                        "Erasing was cancelled. The track being written when you cancelled "
+                        "may be partly erased; erase again to finish the job.")
+                    return
+                if not ok:
+                    self._set_status(f"Erase failed: {msg}.")
+                    messagebox.showerror("Erase failed", f"Erase failed: {msg}.")
+                    self.cbm_pane.refresh()
+                    return
+                if tracks[0] == 36:
+                    if check and not check["error"] and check["t36_checked"] and check["t36_ok"] == 0:
+                        text = "Tracks 36–40 erased. The disk now checks as a 35-track disk."
+                    else:
+                        text = ("Tracks 36–40 were written, but the check afterwards didn't "
+                                "confirm it: " + (check["error"] if check and check["error"] else
+                                "track 36 check timed out" if check and not check["t36_checked"]
+                                else f"{check['t36_ok'] if check else '?'} of 17 sectors on track "
+                                     f"36 still read") + ".")
+                else:
+                    text = ("Disk erased: tracks 1–40 hold nothing readable now. "
+                            "Format it before use.")
+                self._set_status(text)
+                messagebox.showinfo("Erase complete", text)
+                self.cbm_pane.refresh()
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _add_image_frame(self, dlg, row, enabled=True):
         """The 'Safety copy' section of the Sort and FB-ify dialogs.
         The whole disk is always read first; this only chooses whether the image is kept.
@@ -2197,6 +2547,7 @@ class DiskMasher(tk.Tk):
             tmpdir = tempfile.mkdtemp(prefix="diskmasher-")
             part   = None
             local_copy = {}     # index in snap → local file read in step 3
+            rd_stats   = {}
 
             def done():
                 close()
@@ -2209,7 +2560,8 @@ class DiskMasher(tk.Tk):
                         + f"The files read from the disk are in:\n{o['rescue']}" + saved)
                     self._set_status(f"{verb} incomplete — files saved in rescue folder.")
                 elif o["abort"]:
-                    messagebox.showerror(f"{verb} not done", o["abort"] + saved)
+                    note = f"\n\n{o['note']}" if o.get("note") else ""
+                    messagebox.showerror(f"{verb} not done", o["abort"] + note + saved)
                     self._set_status(f"{verb} not done — disk unchanged.")
                 elif cancel_event.is_set():
                     self._set_status(f"{verb} cancelled — disk unchanged.")
@@ -2241,7 +2593,7 @@ class DiskMasher(tk.Tk):
                     # If track 36 couldn't be checked, 35 tracks is still safe here: Sort/FB-ify
                     # never write beyond 35, and a file reaching track 36 shows up in the
                     # analysis as a chain pointing outside the image.
-                    tracks = 40 if pr["t36_readable"] else 35
+                    tracks = 40 if (pr["t36_readable"] or pr["t36_partial"]) else 35
 
                     # --- Step 2: whole-disk read + analysis ---
                     part = (image_path + ".part") if keep_image else os.path.join(tmpdir, "disk.d64")
@@ -2249,13 +2601,16 @@ class DiskMasher(tk.Tk):
                     set_msg("Starting…", detail=det2)
                     err = read_disk_to_file(part, tracks,
                         lambda t, f: set_msg(f"Track {t} of {tracks}", fraction=f, detail=det2),
-                        proc_store, cancel_event)
+                        proc_store, cancel_event, rd_stats)
                     if cancel_event.is_set():
                         return
                     if err:
                         outcome["abort"] = f"Reading the disk failed ({err}).\n\nDisk unchanged."
                         return
                     info = analyze_image(open(part, "rb").read())
+                    if rd_stats.get("copied") is not None and rd_stats["copied"] < rd_stats["expected"]:
+                        outcome["note"] = (f"{rd_stats['expected'] - rd_stats['copied']} of "
+                                           f"{rd_stats['expected']} blocks couldn't be read.")
                     if keep_image:
                         if os.path.exists(image_path):
                             outcome["abort"] = f"{os.path.basename(image_path)} already exists.\n\nDisk unchanged."
