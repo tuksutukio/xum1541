@@ -60,7 +60,11 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 ## Planned and to-do
 
 ### Drive operations
-- Make a file the first one in the directory — mark a file in the right pane and move it to the first directory slot, so it loads with `LOAD"*",8` / `LOAD"*",8,1` (requested 2026-11-25)
+- Make a file the first one in the directory — mark a file in the right pane and move it to the first directory slot, so it loads with `LOAD"*",8` / `LOAD"*",8,1`; the other files either keep their order or get sorted (a choice in the dialog). Likely built on Sort's safe rewrite (`_rewrite_disk`) (requested 2026-11-25)
+
+### Local pane
+- Replace the "↑ Up" button with a `..` entry at the top of the file list (double-click goes up one directory)
+- A "File" button in the freed space, with Delete and New directory (New directory moves there from "New"; where New → Image… goes is open). Delete means the left pane is no longer read-light: update "What it is (and isn't)" when this lands, and delete to the macOS Trash rather than for good
 
 ### Image handling (near term)
 - `.d71` and `.d81` image creation (currently greyed out)
@@ -79,6 +83,10 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 - Write verify — read back after each `cbmwrite` to catch flaky sectors
 - Preferences UI for default checkbox states (platform, FB options) and other settings
 - Window proportion preferences
+
+### Testing and documentation
+- A proper test suite: pure-function tests (image analysis, directory parsing, d64copy output parsing) that run anywhere, plus hardware tests run on request against a real drive and a sacrificial disk (read, write, scratch, erase, format, cancel paths). Today there are no tests at all
+- User documentation: every feature, how to use it, what each check and warning means (this README is a feature list, not a guide)
 
 ### Release
 - GitHub release with full dependency and setup documentation

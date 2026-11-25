@@ -676,10 +676,12 @@ def parse_cbm_dir(raw):
     lines = raw.splitlines()
     entries, disk_name, disk_id, blocks_free = [], "", "", None
     for line in lines:
-        m = re.match(r'\s*\d+\s+\."(.+?)"\s+(\S+)\s+(\S+)', line)
+        # Header: name, then ID and DOS type; some disks show a single field there
+        # (the Lykia disk: `0 ."- lykia - c64   " 2022`), so the second one is optional.
+        m = re.match(r'\s*\d+\s+\."(.+?)"\s+(\S+)(?:\s+(\S+))?', line)
         if m:
             disk_name = m.group(1).strip()
-            disk_id   = f"{m.group(2)} {m.group(3)}"
+            disk_id   = " ".join(g for g in m.group(2, 3) if g)
             continue
         m = re.match(r'\s*(\d+)\s+"(.+?)"\s+(\S+)', line)
         if m:
