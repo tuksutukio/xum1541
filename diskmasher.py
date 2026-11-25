@@ -2405,20 +2405,20 @@ class DiskMasher(tk.Tk):
                   text=f"Drive {DRIVE}" + (f', disk "{name}"' if name else "") + ".\n"
                        "Erasing overwrites whole tracks: nothing on them can be read back.").grid(
             row=0, column=0, sticky="w")
-        what = tk.StringVar(value="extra")
+        what = tk.StringVar(value="all")
         box = ttk.LabelFrame(dlg, text="Erase", padding=(8, 4))
         box.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
-        ttk.Radiobutton(box, variable=what, value="extra",
-                        text="Tracks 36–40 only").grid(row=0, column=0, sticky="w")
-        ttk.Label(box, foreground="gray", justify="left",
-                  text="Makes a 40-track disk a clean 35-track one. Files on tracks 1–35\n"
-                       "stay; anything reaching into tracks 36–40 is lost.").grid(
-            row=1, column=0, sticky="w", padx=(22, 0), pady=(0, 6))
         ttk.Radiobutton(box, variable=what, value="all",
-                        text="Whole disk (tracks 1–40)").grid(row=2, column=0, sticky="w")
+                        text="Whole disk (tracks 1–40)").grid(row=0, column=0, sticky="w")
         ttk.Label(box, foreground="gray", justify="left",
                   text="Everything is gone and the disk reads as never formatted.\n"
                        "Format it before use.").grid(
+            row=1, column=0, sticky="w", padx=(22, 0), pady=(0, 6))
+        ttk.Radiobutton(box, variable=what, value="extra",
+                        text="Tracks 36–40 only").grid(row=2, column=0, sticky="w")
+        ttk.Label(box, foreground="gray", justify="left",
+                  text="Makes a 40-track disk a clean 35-track one. Files on tracks 1–35\n"
+                       "stay; anything reaching into tracks 36–40 is lost.").grid(
             row=3, column=0, sticky="w", padx=(22, 0), pady=(0, 4))
 
         def _go():
