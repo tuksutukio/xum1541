@@ -59,6 +59,16 @@ class Wrappers(FakeTools):
         self.assertEqual(d.drive_status()[0], 0)
         self.assertEqual(d.drive_status(), (74, "74,drive not ready,00,00"))
 
+    def test_detect_outcomes(self):
+        self.scenario(detect=" 8: 1571\n 9: 1571")
+        self.assertEqual(d.parse_detect(d.cbm_detect()), [("8", "1571"), ("9", "1571")])
+        self.scenario(detect="")                     # no drive: empty, not an error
+        self.assertEqual(d.cbm_detect(), "")
+
+    def test_dir_74_is_text_not_an_error(self):
+        self.scenario(dir="74,drive not ready,00,00")
+        self.assertEqual(d._cbm_dir_once("9"), "74,drive not ready,00,00")
+
     def test_run_bounded_stops_a_hung_tool(self):
         self.scenario(hang={"cbmctrl": 30})
         t0 = time.monotonic()

@@ -60,6 +60,9 @@ selection. The divider between the panes can be dragged; window size and divider
 - The choice is remembered. If the remembered drive doesn't answer at start-up, the first drive found is used and
   the status bar says so.
 - You can't switch drives while an operation window is open.
+- **Drive → Reset** resets the bus and every drive on it, then looks for drives again and refreshes. Use it when
+  a drive misbehaves: keeps spinning, answers `74,DRIVE NOT READY`, or seems stuck. If no drive answers
+  afterwards, check the drives' power and the cable; if the xum1541 itself doesn't answer, replug its USB cable.
 - **Drive → Refresh** reads the directory again. Commodore drives can't tell the computer that a disk was
   changed, so the right pane keeps showing the old disk until you refresh. Refresh after every disk change.
 
@@ -159,7 +162,8 @@ A double-sided disk (1571) is refused: reading `.d71` images isn't supported yet
 - **Tool:** `cbmforng` (default) or `cbmformat`.
 - **Name and ID:** the disk name (up to 16 characters) and the disk ID: any two characters, letters or digits, not
   a comma. The ID is shown next to the name in the directory and is useful for telling disks apart; giving each
-  disk its own ID is a good habit.
+  disk its own ID is a good habit. Format checks both before it starts: no comma or `"`, and only characters
+  the drive can store as typed.
 - **Options:**
   - **40-track extended (-x):** format tracks 36–40 too.
   - **No head bump (-n):** skip the knock that moves the head to track 1 first.
@@ -245,7 +249,7 @@ right after `FB`. The C64DTV version isn't offered.
 - **File → New image…:** a blank 35-track `.d64` in the current folder (needs VICE). The disk name and file name
   follow each other while you type.
 - **File → Move to Trash… (⌘⌫):** moves the selected files and folders to the macOS Trash, after a confirmation
-  that lists them (with how many items each folder holds). "No" is the default. Use the Finder's Put Back to undo.
+  that lists them (with how many items each folder holds). **OK** is the default. Use the Finder's Put Back to undo.
   Copying, moving and renaming are left to the Finder.
 - **Look inside an image:** double-click a `.d64`, `.d71` or `.d81` to see its directory (needs VICE).
 - **Read to image…** (in the **← Read** menu): reads the selected files from the drive straight into the image

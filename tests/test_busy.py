@@ -6,10 +6,12 @@ import tkinter as tk
 import unittest
 from tkinter import ttk
 
-from _common import d
+from _common import FakeTools, d
 
 
-class Busy(unittest.TestCase):
+class BusyApp(unittest.TestCase):
+    """A Tk root with DiskMasher's busy machinery bound to it (no tests of its own)."""
+
     def setUp(self):
         self.root = tk.Tk()
         self.root.withdraw()
@@ -66,6 +68,8 @@ class Busy(unittest.TestCase):
         bs = self.app.cbm_pane._menubuttons + [self.app.fs_pane._write_btn]
         return {str(b.cget("state")) for b in bs}
 
+
+class Busy(BusyApp):
     def test_busy_while_running_free_after(self):
         go = threading.Event()
         self.app._start_op("Writing image", go.wait)
@@ -135,6 +139,45 @@ class Busy(unittest.TestCase):
         finally:
             sys.stderr = err
         self.assertEqual(self.states(), {"normal"})
+
+
+class ResetBus(FakeTools, BusyApp):
+    """Drive → Reset (and Cancel's recovery): reset, settle, detect, then three outcomes."""
+
+    def setUp(self):
+        FakeTools.setUp(self)
+        BusyApp.setUp(self)
+        for name in ("_reset_and_check", "_reset_bus"):
+            setattr(self.app, name, getattr(d.DiskMasher, name).__get__(self.app))
+        self.drives_set = []
+        self.app.cbm_pane.set_drives = self.drives_set.append
+        self.warned = []
+        self._warn = d.messagebox.showwarning
+        d.messagebox.showwarning = lambda *a, **k: self.warned.append(a)
+
+    def tearDown(self):
+        d.messagebox.showwarning = self._warn
+        BusyApp.tearDown(self)
+        FakeTools.tearDown(self)
+
+    def test_reset_detects_and_refreshes(self):
+        self.app._reset_bus()
+        self.pump(lambda: self.app._ops == 0)
+        self.assertEqual([c for c in self.calls() if c.startswith("cbmctrl")],
+                         ["cbmctrl reset", "cbmctrl detect"])
+        self.assertEqual(self.drives_set, [[("8", "1571")]])
+        self.assertEqual(self.refreshes, 1)                  # after the operation
+        self.assertIn("Reset — bus OK (8: 1571)", self.app._sv.get())
+        self.assertEqual(self.busy(), "green")
+
+    def test_no_drive_answers(self):
+        self.scenario(detect="")
+        self.app._reset_bus()
+        self.pump(lambda: self.app._ops == 0)
+        self.assertEqual(self.drives_set, [[]])
+        self.assertEqual(len(self.warned), 1)
+        self.assertEqual(self.refreshes, 0)
+        self.assertEqual(self.busy(), "grey")
 
 
 if __name__ == "__main__":

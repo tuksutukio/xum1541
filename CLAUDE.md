@@ -49,6 +49,8 @@ to disk (`FB_PATHS` maps platform → files).
   `_when_free`) are refused, and `cbm_pane.refresh()` only sets `_refresh_pending`, run when the count is back to 0.
   Operations started during one (Cancel's recovery, a follow-up reset) count as part of it. `c1541` threads stay
   plain threads. Tested in `tests/test_busy.py`.
+- **Drive → Reset and Cancel share `_reset_and_check`:** `cbmctrl reset`, 2 s settle, detect; drives found →
+  drive menu updated + refresh (which recovers a 74 head via `cbm_dir`); no answer → replug USB; no drive → power/cable.
 - **After a cancel the bus belongs to `_cancel_and_recover`** until it finishes; it refreshes the right pane itself.
   Workers must check `cancel_event` and skip any further `cbmctrl`/`cbm_dir` call, including the final refresh.
 - **Never `subprocess.run(timeout=…)` for opencbm tools:** on timeout it SIGKILLs. Use `_run_bounded` (short

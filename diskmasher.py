@@ -132,6 +132,23 @@ def _format_safe(raw):
     return raw.decode("ascii")
 
 
+def format_header_problem(name, disk_id):
+    """Why `name`,`disk_id` can't go to cbmforng/cbmformat as typed, or None if fine.
+    The ID is any two characters (drive-1571-users-guide-1985 p.18), the name up to 16.
+    The tools uppercase their argument, so letters are fine in either case; other
+    characters must be plain ASCII $20–$5A. No comma (it separates name and ID) and no
+    quote (it would break the directory header)."""
+    for label, text in (("name", name), ("ID", disk_id)):
+        bad = sorted({c for c in text if not (" " <= c.upper() <= "Z") or c in ',"'})
+        if bad:
+            return f"The {label} can't contain " + " ".join(repr(c) for c in bad) + "."
+    if len(name) > 16:
+        return f"The name is {len(name)} characters; at most 16 fit."
+    if len(disk_id) != 2:
+        return f"The ID must be exactly two characters (now {len(disk_id)})."
+    return None
+
+
 def image_format_header(data):
     """The name and ID to pre-format with before writing a .d64/.d71 image: the image's
     own, from 18/0. The write replaces the name anyway, but the ID also goes into every
@@ -866,13 +883,15 @@ def parse_detect(text):
 
 
 def cbm_detect():
-    started = time.monotonic()
-    try:
-        r = subprocess.run(["cbmctrl", "detect"], capture_output=True, text=True, timeout=5)
-        log_cmd(["cbmctrl", "detect"], started, f"exit {r.returncode}", r.stdout + r.stderr)
-        return r.stdout.strip()
-    except Exception as e:
-        return f"Error: {e}"
+    """`cbmctrl detect` output; "" when no drive answers (exit 1, no output), "Error: …"
+    when it hangs or reports an error (e.g. no xum1541 on USB)."""
+    r = _run_bounded(["cbmctrl", "detect"], 5)
+    if r is None:
+        return "Error: cbmctrl detect didn't answer in 5 s (replug the xum1541's USB cable)"
+    rc, out = r[0], (r[1] or "").strip()
+    if rc != 0 and out:
+        return f"Error: {out.splitlines()[-1]}"
+    return out
 
 
 def drive_status(drive=None, timeout=120):
@@ -889,15 +908,15 @@ def drive_status(drive=None, timeout=120):
 
 
 def _cbm_dir_once(drive):
-    started = time.monotonic()
-    try:
-        r = subprocess.run(["cbmctrl", "dir", drive],
-                           capture_output=True, text=True, timeout=30)
-        log_cmd(["cbmctrl", "dir", drive], started, f"exit {r.returncode}",
-                (r.stdout or "")[-200:] + (r.stderr or ""))
-        return r.stdout.strip()
-    except Exception as e:
-        return f"Error: {e}"
+    """`cbmctrl dir` output (a drive error like 74 comes back as text, with exit 0), or
+    "Error: …" when it hangs or fails."""
+    r = _run_bounded(["cbmctrl", "dir", drive], 30)
+    if r is None:
+        return "Error: cbmctrl dir didn't answer in 30 s"
+    rc, out = r[0], (r[1] or "").strip()
+    if rc != 0:
+        return f"Error: {out.splitlines()[-1] if out else f'cbmctrl dir exited {rc}'}"
+    return out
 
 
 def cbm_dir(drive=None):
@@ -1275,9 +1294,10 @@ class FilesystemPane(ttk.Frame):
         if len(items) > 12:
             lines.append(f"  … and {len(items) - 12} more")
         what = (f'"{items[0][0]}"' if len(items) == 1 else f"these {len(items)} items")
-        if not messagebox.askyesno("Move to Trash",
+        # OK is the default (Antti, 2026-11-25): the Trash is recoverable (Finder's Put Back).
+        if not messagebox.askokcancel("Move to Trash",
                 f"Move {what} to the Trash?\n\n" + "\n".join(lines),
-                icon="warning", default="no"):
+                icon="warning", default="ok"):
             return
         paths = [p for _, _, p in items]
         try:
@@ -1482,6 +1502,7 @@ class CbmDirPane(ttk.Frame):
         drive_menu = tk.Menu(drive_btn, tearoff=False)
         drive_menu.add_command(label="Detect",  command=lambda: self.event_generate("<<DetectRequest>>"))
         drive_menu.add_command(label="Refresh", command=lambda: self.event_generate("<<RefreshRequest>>"))
+        drive_menu.add_command(label="Reset",   command=lambda: self.event_generate("<<ResetRequest>>"))
         drive_btn["menu"] = drive_menu
         self._drive_menu = drive_menu
         self.drive_var   = tk.StringVar(value=DRIVE)
@@ -1531,8 +1552,8 @@ class CbmDirPane(ttk.Frame):
     def set_drives(self, drives):
         """Rebuild the drive choices under Detect/Refresh from [(unit, model)]."""
         m = self._drive_menu
-        if m.index("end") is not None and m.index("end") > 1:
-            m.delete(2, "end")
+        if m.index("end") is not None and m.index("end") > 2:
+            m.delete(3, "end")
         m.add_separator()
         if not drives:
             m.add_command(label="(no drives detected)", state="disabled")
@@ -1678,6 +1699,7 @@ class DiskMasher(tk.Tk):
         self.cbm_pane.bind("<<DriveSelected>>",
                            lambda e: self._select_drive(self.cbm_pane.drive_var.get()))
         self.cbm_pane.bind("<<RefreshRequest>>", self._when_free(self._refresh_cbm))
+        self.cbm_pane.bind("<<ResetRequest>>",   self._when_free(self._reset_bus))
         self.cbm_pane.bind("<<ReadRequest>>",   self._when_free(self._read_from_cbm))
         self.cbm_pane.bind("<<FormatRequest>>", self._when_free(self._format_disk))
         self.cbm_pane.bind("<<FBifyRequest>>",    self._when_free(self._fbify_disk))
@@ -1927,33 +1949,48 @@ class DiskMasher(tk.Tk):
         def _run():
             _stop_proc(proc_store[0])
             self.after(0, lambda: self._set_status("Cancelled — resetting bus…"))
-            _run_bounded(["cbmctrl", "reset"], 5)
-            time.sleep(2)   # drives run their power-on init after a reset
-            r = _run_bounded(["cbmctrl", "detect"], 5)
-            drives = (re.findall(r'^\s*(\d+):\s*(\S+)', r[1], re.M)
-                      if r is not None and r[0] == 0 else [])
-            self._have_drives = bool(drives)        # the dot turns grey without drives
-            if drives:
-                found = ", ".join(f"{dev}: {model}" for dev, model in drives)
-                def _ok():
-                    self._set_status(f"Cancelled — bus OK ({found}).")
-                    self.cbm_pane.refresh()
-                self.after(0, _ok)
-            elif r is None:
-                self.after(0, lambda: (
-                    self._set_status("xum1541 unresponsive — replug USB cable."),
-                    messagebox.showerror("Bus unresponsive",
-                        "The xum1541 did not answer a drive scan.\n\n"
-                        "Replug its USB cable to recover. If that isn't enough, "
-                        "power-cycle the drive too.")))
-            else:
-                self.after(0, lambda: (
-                    self._set_status("Cancelled — no drive answers."),
-                    messagebox.showwarning("No drive",
-                        "The xum1541 responds, but no drive answered the scan.\n\n"
-                        "Check the drive's power and the IEC cable.")))
+            self._reset_and_check("Cancelled")
 
         self._start_op('Recovering the bus', _run)
+
+    def _reset_and_check(self, what):
+        """Worker side of Cancel's recovery and Drive → Reset: `cbmctrl reset` (every drive on
+        the bus), a settle pause, and a `cbmctrl detect` probe that tells three outcomes
+        apart: drives answer (refresh, which recovers a 74 head), the xum1541 doesn't answer
+        (replug USB), or no drive answers (power, cable). `what` starts the status text."""
+        _run_bounded(["cbmctrl", "reset"], 5)
+        time.sleep(2)   # drives run their power-on init after a reset
+        r = _run_bounded(["cbmctrl", "detect"], 5)
+        drives = parse_detect(r[1]) if r is not None and r[0] == 0 else []
+        self._have_drives = bool(drives)        # the dot turns grey without drives
+        if drives:
+            found = ", ".join(f"{dev}: {model}" for dev, model in drives)
+            def _ok():
+                self.cbm_pane.set_drives(drives)
+                self._set_status(f"{what} — bus OK ({found}).")
+                self.cbm_pane.refresh()
+            self.after(0, _ok)
+        elif r is None:
+            self.after(0, lambda: (
+                self._set_status("xum1541 unresponsive — replug USB cable."),
+                messagebox.showerror("Bus unresponsive",
+                    "The xum1541 did not answer a drive scan.\n\n"
+                    "Replug its USB cable to recover. If that isn't enough, "
+                    "power-cycle the drive too.")))
+        else:
+            self.after(0, lambda: (
+                self.cbm_pane.set_drives([]),
+                self._set_status(f"{what} — no drive answers."),
+                messagebox.showwarning("No drive",
+                    "The xum1541 responds, but no drive answered the scan.\n\n"
+                    "Check the drive's power and the IEC cable.")))
+
+    def _reset_bus(self):
+        """Drive → Reset: put the bus and every drive back to idle (stops a drive that keeps
+        spinning, clears a stuck state), then detect and refresh."""
+        log_event("--- Drive → Reset")
+        self._set_status("Resetting the bus…")
+        self._start_op("Resetting", lambda: self._reset_and_check("Reset"))
 
     def _detect_drives(self, on_done=None):
         self._set_status("Detecting drives…")
@@ -2378,7 +2415,7 @@ class DiskMasher(tk.Tk):
                     fmt_flag = ["-x"] if is_40track else []
                     fmt_cmd  = ["cbmforng"] + fmt_flag + ["-r", "2", DRIVE, f"{dname},{did}"]
                     self.after(0, lambda: _append(f"Pre-formatting drive {DRIVE}…\n"))
-                    subprocess.run(["cbmctrl", "reset"], capture_output=True, timeout=5)
+                    _run_bounded(["cbmctrl", "reset"], 5)
                     rc = self._pty_run(fmt_cmd, _append, proc_store)
                     if rc != 0:
                         self.after(0, lambda: _append("\nFormat failed — aborting write.\n"))
@@ -2815,6 +2852,10 @@ class DiskMasher(tk.Tk):
         def _do_format():
             dname = name_var.get().strip() or "DISKNAME"
             did   = id_var.get().strip() or "01"
+            problem = format_header_problem(dname, did)
+            if problem:
+                messagebox.showerror("Format", problem, parent=dlg)
+                return
             tool  = tool_var.get()
             cmd   = [tool]
             if ext_var.get():      cmd.append("-x")

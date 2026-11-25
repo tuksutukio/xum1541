@@ -115,3 +115,15 @@ class FormatHeader(unittest.TestCase):
 
     def test_short_data(self):
         self.assertEqual(d.image_format_header(b""), ("DISK", "01"))
+
+
+class FormatHeaderInput(unittest.TestCase):
+    def test_fine(self):
+        for name, did in (("DISKNAME", "01"), ("games 1987", "2a"), ("A-B.C!", "Z9"), ("X" * 16, "  ")):
+            self.assertIsNone(d.format_header_problem(name, did), (name, did))
+
+    def test_problems(self):
+        for name, did, want in (("A,B", "01", "name"), ('"Q"', "01", "name"), ("X" * 17, "01", "16"),
+                                ("OK", "1", "exactly two"), ("OK", "012", "exactly two"),
+                                ("OK", "0,", "ID"), ("ÄÖ", "01", "name"), ("OK", "{}", "ID")):
+            self.assertIn(want, d.format_header_problem(name, did) or "", (name, did))
