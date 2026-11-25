@@ -113,6 +113,11 @@ SECTORS_PER_TRACK = [21] * 17 + [19] * 7 + [18] * 6 + [17] * 10   # tracks 1–4
 FILE_TYPES = {0: "DEL", 1: "SEQ", 2: "PRG", 3: "USR", 4: "REL"}
 
 
+def _read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
 def _blk(track, sector):
     """Block index of track/sector in a d64 image."""
     return sum(SECTORS_PER_TRACK[:track - 1]) + sector
@@ -376,7 +381,7 @@ def probe_disk(proc_store=None, cancel_event=None, track18=True):
             if cancel_event is not None and cancel_event.is_set():
                 res["error"] = "cancelled"
                 return res
-            data = open(p18, "rb").read() if os.path.exists(p18) else b""
+            data = _read_bytes(p18) if os.path.exists(p18) else b""
             if r is None or r[0] != 0 or len(data) not in IMAGE_FORMATS or \
                     not re.search(r'\d+ blocks copied', r[1]):
                 res["error"] = "could not read the directory track (18)"
@@ -397,7 +402,7 @@ def probe_disk(proc_store=None, cancel_event=None, track18=True):
             reset_and_settle()
             return res
         res["t36_checked"] = True
-        data = open(p36, "rb").read() if os.path.exists(p36) else b""
+        data = _read_bytes(p36) if os.path.exists(p36) else b""
         if len(data) == 196608 and r[0] == 0 and re.search(r'\d+ blocks copied', r[1]):
             # No error table: d64copy left it out because nothing failed (seen on full
             # reads; single-track reads have so far always included one).
@@ -450,7 +455,7 @@ def _drive_mem_read(addr, count, tmp, proc_store=None, cancel_event=None):
                      proc_store)
     if r is None or r[0] != 0 or not os.path.exists(path):
         return None
-    data = open(path, "rb").read()
+    data = _read_bytes(path)
     return data if len(data) == count else None
 
 
@@ -2217,7 +2222,7 @@ class DiskMasher(tk.Tk):
                         report.append(f"{expected - copied} of {expected} blocks couldn't be "
                                       "read (marked in the image's error table).")
                     try:
-                        report += describe_image(analyze_image(open(out_path, "rb").read()))
+                        report += describe_image(analyze_image(_read_bytes(out_path)))
                     except (ValueError, OSError) as e:
                         report.append(f"(no analysis: {e})")
                 elif os.path.exists(part):
@@ -2678,7 +2683,7 @@ class DiskMasher(tk.Tk):
                     if err:
                         outcome["abort"] = f"Reading the disk failed ({err}).\n\nDisk unchanged."
                         return
-                    info = analyze_image(open(part, "rb").read())
+                    info = analyze_image(_read_bytes(part))
                     if rd_stats.get("copied") is not None and rd_stats["copied"] < rd_stats["expected"]:
                         outcome["note"] = (f"{rd_stats['expected'] - rd_stats['copied']} of "
                                            f"{rd_stats['expected']} blocks couldn't be read.")

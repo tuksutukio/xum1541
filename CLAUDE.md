@@ -10,8 +10,13 @@ The "UI layout" and "lockup" sections moved here on 2026-10-15 from Claude's per
 ## Running
 
 - `./diskmasher.py` (shebang `/opt/homebrew/bin/python3.13`; stdlib only, no venv or requirements file).
-- No tests, linter or build step. Verifying a change means running the app against real hardware (xum1541 + drive 8),
-  so IEC operations can't be checked from a session alone: say what's untested and ask Antti to try it.
+- Offline tests (stdlib `unittest`, no hardware, ~6 s): `/opt/homebrew/bin/python3.13 -B -m unittest discover -s tests`
+  (one file: add `-p test_tools.py`). Run them after every change. `tests/_common.py` builds `.d64` images
+  (`make_d64`) and puts fake opencbm tools (`tests/fake_opencbm.py`, with a simulated drive memory and job queue) on
+  `PATH`; it also points `LOG_FILE` at a temp file. New opencbm behaviour learnt on hardware goes into the fakes as a
+  scenario, with the real output text.
+- The tests can't prove IEC behaviour: a change to a drive operation still needs a run against real hardware
+  (xum1541 + a drive), so say what's untested and ask Antti to try it. No linter or build step.
 - External tools: opencbm via Homebrew (`cbmctrl`, `cbmwrite`, `cbmread`, `d64copy`, `cbmforng`, `cbmformat`); VICE's
   `c1541` found at `/Applications/VICE*/bin/c1541` (image features are disabled when it's missing).
 - State outside the repo: prefs (geometry, sash, checkbox defaults) in `~/.config/diskmasher/prefs.ini`; single-instance

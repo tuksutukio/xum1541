@@ -48,6 +48,8 @@ It is **not** a general-purpose file manager. The left pane does only what a dis
 
 ## Testing status
 
+An offline test suite (58 tests, about 6 seconds, no drive needed) covers disk image analysis, parsing of opencbm output, the erase routine's bytes, and the drive protocols against simulated opencbm tools: success and failure detection, the erase job sequence, recovery from `74,DRIVE NOT READY`, and the track-36 disk check. Run it with `python3.13 -m unittest discover -s tests`. Tests against a real drive are still to come.
+
 Most IEC operations have been exercised extensively in normal use. Cancel handling has been tested under adverse conditions: drive power cycle mid-read, IEC cable unplug mid-read, and cancel during reads on disks with bad sectors. The bus has proven more resilient than initially expected — no true xum1541 firmware lockups were reproduced during testing.
 
 The **Read IEC files to image** feature is newly implemented and has seen limited testing. The image creation and directory browse features have been verified with VICE.
@@ -82,7 +84,7 @@ The current "Read to image…" implementation is deliberately minimal: it reads 
 - Window proportion preferences
 
 ### Testing and documentation
-- A proper test suite: pure-function tests (image analysis, directory parsing, d64copy output parsing) that run anywhere, plus hardware tests run on request against a real drive and a sacrificial disk (read, write, scratch, erase, format, cancel paths). Today there are no tests at all
+- Hardware tests, run on request against a real drive and a sacrificial disk (read, write, scratch, erase, format, cancel paths); the offline suite is in `tests/`
 - User documentation: every feature, how to use it, what each check and warning means (this README is a feature list, not a guide)
 
 ### Release
