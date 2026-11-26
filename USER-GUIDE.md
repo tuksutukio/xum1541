@@ -51,6 +51,9 @@ The window has two panes side by side.
 **Copying names:** ⌘C copies the selected names to the clipboard, one per line. In the left pane ⇧⌘C copies their
 full paths instead. In the right pane both copy the names as shown.
 
+**Type to select:** in the left pane, typing the start of a name selects the first folder or file that begins with
+it, as in Finder; case is ignored, and a pause of a second starts over.
+
 **Finding a file:** in the left pane, ⌘V looks for the file names on the clipboard in the current folder and selects
 them; for a full path only its last part counts, and the folder doesn't change. ⇧⌘V follows a path: it opens the
 folder of the path on the clipboard (from ⇧⌘C, or Finder's Copy as Pathname) and selects the item there. As with

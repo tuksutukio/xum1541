@@ -75,6 +75,32 @@ class Clipboard(BusyApp):
         self.assertEqual(pane._path, sub)
         self.assertIn("No such folder", self.app._sv.get())
 
+    def test_type_to_select(self):
+        folder = tempfile.mkdtemp()
+        for n in ("Matrix.prg", "matrix1.prg", "munajuttu.prg", "zed.d64"):
+            open(os.path.join(folder, n), "w").close()
+        os.mkdir(os.path.join(folder, "music"))
+        pane = d.FilesystemPane(self.root)
+        pane._path = folder
+        pane._load()
+
+        def sel():
+            return [pane._entries[i][0] for i in pane.lb.curselection()]
+        pane.type_select("m", 10.0)
+        self.assertEqual(sel(), ["music"])                 # folders come first in the list
+        pane.type_select("a", 10.3)
+        self.assertEqual(sel(), ["Matrix.prg"])            # "ma", case ignored
+        pane.type_select("t", 10.6)
+        pane.type_select("r", 10.9)
+        pane.type_select("i", 11.2)
+        pane.type_select("x", 11.5)
+        pane.type_select("1", 11.8)
+        self.assertEqual(sel(), ["matrix1.prg"])
+        pane.type_select("z", 13.5)                         # a pause starts a new search
+        self.assertEqual(sel(), ["zed.d64"])
+        pane.type_select("q", 13.6)                         # "zq": no match, selection stays
+        self.assertEqual(sel(), ["zed.d64"])
+
     def test_right_pane_names_as_shown(self):
         pane = d.CbmDirPane(self.root)
         pane._entries = [(34, "matrix", "prg"), (1, "notes", "seq")]

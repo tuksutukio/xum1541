@@ -1416,6 +1416,8 @@ class FilesystemPane(ttk.Frame):
         self.lb.bind("<Command-BackSpace>", lambda e: self._trash_selected())
         self.lb.bind("<Command-c>",       lambda e: self.copy_selected(full=False) or "break")
         self.lb.bind("<Command-v>",       lambda e: self.paste_locate(follow=False) or "break")
+        self.lb.bind("<KeyPress>",        self._on_type_key)
+        self._typed, self._typed_at = "", 0.0
         for seq in ("<Command-V>", "<Shift-Command-v>", "<Shift-Command-V>"):
             self.lb.bind(seq, lambda e: self.paste_locate(follow=True) or "break")
         for seq in ("<Command-C>", "<Shift-Command-c>", "<Shift-Command-C>"):
@@ -1785,6 +1787,36 @@ class FilesystemPane(ttk.Frame):
 
     def current_dir(self):
         return self._path
+
+    TYPE_PAUSE = 1.0        # seconds: a longer pause between keys starts a new search
+    _MODIFIERS = 0x04 | 0x08 | 0x10     # Control, Mod1 (⌘ on macOS), Mod2 (⌥ on macOS)
+
+    def _on_type_key(self, event):
+        """Type-to-select, as in Finder (Antti, 2026-11-26; Tk's Listbox has none): printable
+        keys without ⌘/⌃/⌥ go to type_select. Other keys (arrows, Return, shortcuts) pass."""
+        ch = event.char
+        if len(ch) != 1 or not ch.isprintable() or event.state & self._MODIFIERS:
+            return None
+        self.type_select(ch, time.monotonic())
+        return "break"
+
+    def type_select(self, ch, now):
+        """Add ch to the typed prefix (or start a new one after TYPE_PAUSE) and select the
+        first name, folders and files alike, that starts with it, ignoring case. No match:
+        the selection stays."""
+        if now - self._typed_at > self.TYPE_PAUSE:
+            self._typed = ""
+        self._typed_at = now
+        self._typed += ch.lower()
+        for i, (name, _, _) in enumerate(self._entries):
+            if name != ".." and name.lower().startswith(self._typed):
+                self.lb.selection_clear(0, tk.END)
+                self.lb.selection_set(i)
+                self.lb.activate(i)
+                self.lb.see(i)
+                self._update_sel()
+                return i
+        return None
 
     def paste_locate(self, follow=False):
         """Find what the clipboard names and select it (Antti, 2026-11-26). ⌘V (follow=False):
