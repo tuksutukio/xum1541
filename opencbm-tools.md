@@ -218,7 +218,9 @@ Useful actions:
   gave ` 8: *unknown*, footprint=<@B@@>` (2026-11-26). An unknown model with a footprint hints at a clash.
 
 **A second device on the bus halves `d64copy`'s speed** (2026-11-26, 1541 at 8, same disk): 158 s for a full
-35-track read with a 1571 also on the bus (twice), 87 s with the 1571 unplugged (twice). `d64copy --help`:
+35-track read with a 1571 also on the bus (twice), 87 s with the 1571 unplugged (twice); the 1571 at 9 took
+92 s with the 1541 on the bus (twice) and 52 s alone (three times). The disks swapped between drives made no
+difference. `d64copy --help`:
 `serial2` "won't work if more than one device is connected to the IEC bus"; `auto` (the default) "tries to
 determine the best option". So timings are only comparable with the same set of devices on the bus. Whether
 `auto` counts devices, and whether a wrong pick explains the early stalls seen with two drives, is unverified.

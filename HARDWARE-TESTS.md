@@ -8,6 +8,22 @@ code).
 Cells: date (day-first is for chat; ISO here), ✓ worked, ✗ failed, ◐ worked with a caveat, — not run. Details and
 timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents in `CLAUDE.md`.
 
+## Strategy (draft, 2026-11-26)
+
+- **One drive on the bus** for anything measured or compared (timings, stalls, drive against drive). A second
+  device makes `d64copy` ~75 % slower (opencbm-tools.md) and may cause stalls. Multi-drive setups are a test case
+  of their own, not the bench.
+- **Before any test that writes, list the disk on its own** and confirm it's the agreed test disk.
+- **Worn, reused disks first** (what users have); a mint disk as the reference when a result might be the disk.
+- **Unattended long runs** while Antti is away (his offer): one drive, one test disk, a script that loops read-only
+  full reads (and, on a sacrificial disk, write/read-back cycles), each with a no-progress watchdog, logging
+  drive, uptime, duration, stalls and retries; a summary table at the end. Read-only loops can run on any disk.
+- **Swap one thing at a time** when hunting a fault: the disk between drives, the drive on a unit (DIP switches),
+  the devices on the bus. Two of each kind make the comparison.
+- **Update the matrix** after every hardware test, and mark cells stale when the code behind them changes.
+- **Next candidates:** drive 9 alone vs with a second drive over a long run (stalls); Erase and Make first on the
+  1541; the VIC-1541 (ROM via a dump compared with VICE's ROM files); the 1570s and 1541-IIs; SD2IEC.
+
 ## Drives
 
 | Short | Drive | Unit | Notes |
@@ -66,3 +82,6 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
   stepping); a full read in between and one after both ran clean in 86–92 s. Rebuild's write was verified by a
   separate full read afterwards: all 13 files identical in type, name, data and order. Make first 12 s, Sort 12 s,
   FB-ify (C16/Plus4) 44 s, FB-ify (C64, replacing) 48 s, `LOAD"*"` gave `fb64`, restore 8.1 s.
+- **2026-11-26, round 1 (bus):** same two disks, swapped between the 1541 and drive 9: full reads 158 s (1541) and
+  92 s (1571) with both drives on the bus, 87 s and 52 s with the drive alone; no stalls in 9 reads. Timings
+  above from before ~19:54 were with the 1541 alone; from then until 20:50 with both drives on the bus.
