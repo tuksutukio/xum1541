@@ -1807,6 +1807,46 @@ class DiskMasher(tk.Tk):
             self._detect_drives(on_done=self.cbm_pane.refresh)
         self._restore_prefs()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if not _load_prefs().getboolean("startup", "hide_warning", fallback=False):
+            self.after(300, self._show_startup_warning)
+
+    STARTUP_WARNING = (
+        "Diskmasher works with real floppy disks, many of them 30 to 40 years old.\n\n"
+        "Old magnetic media is fragile. The coating weakens and can start to shed, and any "
+        "read or write, even in a healthy drive, can damage such a disk beyond repair. A "
+        "shedding disk can also leave dirt on the drive's head that harms the next disk.\n\n"
+        "• Read a disk to an image before writing to it, if its contents matter.\n"
+        "• Keep rare originals write-protected (opaque tape over the notch).\n"
+        "• If a disk scrapes, squeaks or reads with many errors, stop and clean the head.\n\n"
+        "You use Diskmasher at your own risk.")
+
+    def _show_startup_warning(self):
+        """The warning about old media at start-up, until "Don't show again" is ticked
+        (Antti, 2026-11-26); stored as [startup] hide_warning in prefs.ini."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Before you start")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        _take_focus(dlg)
+        ttk.Label(dlg, text=self.STARTUP_WARNING, wraplength=440, justify="left",
+                  padding=(16, 14, 16, 8)).pack(anchor="w")
+        hide = tk.BooleanVar(value=False)
+        row = ttk.Frame(dlg, padding=(16, 0, 16, 12))
+        row.pack(fill="x")
+        ttk.Checkbutton(row, text="Don't show again", variable=hide).pack(side="left")
+
+        def ok(_event=None):
+            if hide.get():
+                cfg = _load_prefs()
+                if "startup" not in cfg:
+                    cfg["startup"] = {}
+                cfg["startup"]["hide_warning"] = "yes"
+                _save_prefs(cfg)
+            dlg.destroy()
+        ttk.Button(row, text="OK", command=ok, default="active").pack(side="right")
+        dlg.bind("<Return>", ok)
+        dlg.protocol("WM_DELETE_WINDOW", ok)
 
     def _restore_prefs(self):
         global DRIVE

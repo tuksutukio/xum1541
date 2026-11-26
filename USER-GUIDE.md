@@ -311,7 +311,8 @@ What the check can find:
 
 ## Where Diskmasher keeps things
 
-- **Settings** (window size, divider position, drive, checkbox defaults):
+- **Settings** (window size, divider position, drive, checkbox defaults, whether the start-up warning about
+  old disks is shown):
   `~/.config/diskmasher/prefs.ini`
 - **Drive command log:** `~/Library/Logs/diskmasher.log`; the previous one is `diskmasher.log.1`.
 - **Directory backups from Make first, Sort and FB-ify:**
