@@ -1150,7 +1150,7 @@ def _cbm_dir_once(drive):
 # took ~75 % longer on both a 1541 and a 1571, and both early stalls seen on a 1571 had two
 # drives on the bus (opencbm-tools.md). Advice only: the Drive menu still offers them all.
 MULTI_DRIVE_NOTE = ("  More than one drive is on the bus: transfers are slower and less reliable. "
-                    "Switch off or unplug the drives you're not using.")
+                    "Switch off and unplug the drives you're not using.")
 
 NO_ANSWER = "Error: drive {drive} doesn't answer. Is it switched on and connected?"
 NO_DRIVE = ("Error: no drive answers on the bus. Switch one on (or check the cable), "
@@ -1974,8 +1974,8 @@ class DiskMasher(tk.Tk):
         "• Read a disk to an image before writing to it, if its contents matter.\n"
         "• Keep rare originals write-protected (opaque tape over the notch).\n"
         "• If a disk scrapes, squeaks or reads with many errors, stop and clean the head.\n"
-        "• For best results, have only one drive on the serial bus at a time: switch off or "
-        "unplug the others.\n\n"
+        "• For best results, have only one drive on the serial bus at a time: switch the "
+        "others off and unplug them (a switched-off drive can still load the bus).\n\n"
         "You use Diskmasher at your own risk.")
 
     def _show_startup_warning(self):

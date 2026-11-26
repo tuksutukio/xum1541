@@ -25,8 +25,8 @@ messages mean. For installation requirements, see [README.md](README.md).
 - At start-up it looks for drives on the bus and lists the disk in the selected drive.
 - The left pane opens at your home folder.
 - **Use one drive on the bus at a time.** With a second drive connected, even an idle one, transfers took about
-  75 % longer, and the only stalls seen in testing happened with two drives on the bus. Switch off or unplug the
-  drives you're not using; after a change, use Drive → Detect. Diskmasher reminds you in the status bar when
+  75 % longer, and the only stalls seen in testing happened with two drives on the bus. Switch off and unplug the
+  drives you're not using (a switched-off drive can still load the bus); after a change, use Drive → Detect. Diskmasher reminds you in the status bar when
   Detect finds more than one drive.
 - **Only one program can use the xum1541 at a time.** While Diskmasher is working on the drive, command-line
   tools (`cbmctrl`, `d64copy`) fail with `LIBUSB_ERROR_ACCESS`, and the other way round.
