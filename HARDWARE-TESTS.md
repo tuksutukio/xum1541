@@ -16,6 +16,10 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
   report it upstream some day.
 - **Before any test that writes, list the disk on its own** and confirm it's the agreed test disk.
 - **Worn, reused disks first** (what users have); a mint disk as the reference when a result might be the disk.
+- **Default test disk image:** `/Users/tuksu/tmp/diskname_backup.d64` (Antti, 2026-11-26): DISKNAME, ID 01, 13 files
+  (PRG, SEQ, USR, 14 blocks free), read from the test disk on 2026-11-26. Write it to a test disk to start from a
+  known state. It also holds a cross-link (NOTES and USERDATA share 2/0), useful for testing cross-link detection.
+  Local only: the files aren't ours to publish.
 - **Unattended long runs** while Antti is away (his offer): one drive, one test disk, a script that loops read-only
   full reads (and, on a sacrificial disk, write/read-back cycles), each with a no-progress watchdog, logging
   drive, uptime, duration, stalls and retries; a summary table at the end. Read-only loops can run on any disk.
