@@ -3414,6 +3414,13 @@ class DiskMasher(tk.Tk):
                             f"or couldn't be read ({raw.splitlines()[-1] if raw else 'empty'}). "
                             "Nothing was written.")
                         return
+                    # Reset after the scratch, before the writes: without it every
+                    # cbmwrite failed at once with 74,DRIVE NOT READY,18,00 on a 1541
+                    # (2026-11-26, no 2 MHz mode there), while the scratch and the
+                    # listing had worked. Resetting here costs nothing (the scratch is done).
+                    reset_and_settle()
+                    if cancel_event.is_set():
+                        return
                 else:
                     det4 = f"Step 1 of 1 · Writing"
 

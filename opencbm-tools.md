@@ -71,7 +71,14 @@ reset).
 13 files `5;` (not even a decimal digit; the drive converts the count with SED/ADC and prints the nibbles,
 anatomy-of-the-1541 p.216). The scratch itself was complete and the BAM consistent every time. Suspected: the
 counter (`$86`, anatomy p.144) is reused during long scratches; not checked in the 1571 ROM. Check the directory, not
-the count.
+the count. **A 1541 counts right:** the same 13-file `S:*` on a plain 1541 (2026-11-26, device 8) answered
+`01, FILES SCRATCHED,13,00`, in 189 s.
+
+**Writes after a scratch fail until a reset, on a 1541 too** (2026-11-26, device 8, during Sort): `d64copy`,
+reset, 13 `cbmread`s, `S:*` (status 01, directory empty, 664 blocks free), then every `cbmwrite` failed within a
+second with `74,DRIVE NOT READY,18,00`. A 1541 has no 2 MHz mode, so the 1571's 2 MHz state (below) can't be the
+whole story. Hypothesis, unchecked: the fast-transfer code `cbmread` uploads into drive RAM leaves the DOS
+unable to write until a reset. Sort now resets after the scratch.
 
 **After the drive's own Copy or Rename (`cbmctrl command <unit> C0:NEW=OLD` / `R0:NEW=OLD`, 2026-11-26, drive 9, 1571):**
 the commands themselves worked (types kept), but the next `cbmwrite`s failed with `71,DIR ERROR,01,04`, even after
