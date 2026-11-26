@@ -872,6 +872,16 @@ def restore_directory_backup(path):
     return None
 
 
+def _take_focus(dlg):
+    """Make a new dialog the active window. On macOS a Toplevel opened from a menu isn't
+    activated by itself, so the first click on it only activates it and does nothing else
+    (Antti, 2026-11-26: the FB-ify dialog's C64 radio button took two presses). Once Tk is
+    idle, focus goes to the widget that last asked for it inside the dialog (e.g. a name
+    field), else the dialog itself."""
+    dlg.lift()
+    dlg.after_idle(lambda: dlg.winfo_exists() and dlg.focus_lastfor().focus_force())
+
+
 def _bind_mac_multiselect(lb):
     """Make Command-click toggle items in extended-select Listbox (macOS convention)."""
     def _cmd_click(event):
@@ -1366,6 +1376,7 @@ class FilesystemPane(ttk.Frame):
         dlg.resizable(True, True)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
         self.update_idletasks()
         x = self.winfo_rootx() + 40
         y = self.winfo_rooty() + 40
@@ -1469,6 +1480,7 @@ class FilesystemPane(ttk.Frame):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
         self.update_idletasks()
         x = self.winfo_rootx() + self.winfo_width()  // 2 - 160
         y = self.winfo_rooty() + self.winfo_height() // 2 - 40
@@ -1499,6 +1511,7 @@ class FilesystemPane(ttk.Frame):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         # --- image type ---
         type_frame = ttk.LabelFrame(dlg, text="Image type", padding=(8, 4))
@@ -2636,6 +2649,7 @@ class DiskMasher(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         info_frame = ttk.LabelFrame(dlg, text="Image", padding=(8, 4))
         info_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
@@ -2780,6 +2794,7 @@ class DiskMasher(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         info_frame = ttk.LabelFrame(dlg, text="Source", padding=(8, 4))
         info_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
@@ -3046,6 +3061,7 @@ class DiskMasher(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         # --- Tool selector ---
         tool_var = tk.StringVar(value="cbmforng")
@@ -3186,6 +3202,7 @@ class DiskMasher(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         name = self.cbm_pane.disk_name.strip()
         ttk.Label(dlg, padding=(14, 12, 14, 4), justify="left",
@@ -3480,6 +3497,7 @@ class DiskMasher(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         fb_var   = tk.BooleanVar(value=False)
         plat_var = tk.StringVar(value="C16/Plus4")
@@ -3564,6 +3582,7 @@ class DiskMasher(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        _take_focus(dlg)
 
         plat_var = tk.StringVar(value="C16/Plus4")
 
