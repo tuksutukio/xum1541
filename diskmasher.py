@@ -1012,6 +1012,14 @@ def restore_directory_backup(path):
     return None
 
 
+def _grab(dlg):
+    """grab_set() if Tk allows it now (not while the window isn't viewable)."""
+    try:
+        dlg.grab_set()
+    except tk.TclError:
+        pass
+
+
 def _take_focus(dlg):
     """Make a new dialog the active window. On macOS a Toplevel opened from a menu isn't
     activated by itself, so the first click on it only activates it and does nothing else
@@ -1965,7 +1973,9 @@ class DiskMasher(tk.Tk):
         "shedding disk can also leave dirt on the drive's head that harms the next disk.\n\n"
         "• Read a disk to an image before writing to it, if its contents matter.\n"
         "• Keep rare originals write-protected (opaque tape over the notch).\n"
-        "• If a disk scrapes, squeaks or reads with many errors, stop and clean the head.\n\n"
+        "• If a disk scrapes, squeaks or reads with many errors, stop and clean the head.\n"
+        "• For best results, have only one drive on the serial bus at a time: switch off or "
+        "unplug the others.\n\n"
         "You use Diskmasher at your own risk.")
 
     def _show_startup_warning(self):
@@ -1975,7 +1985,11 @@ class DiskMasher(tk.Tk):
         dlg.title("Before you start")
         dlg.resizable(False, False)
         dlg.transient(self)
-        dlg.grab_set()
+        # Modal (Antti, 2026-11-26: the main window stayed usable behind it). Opened right
+        # after start-up the window may not be on screen yet, and a grab on a window that
+        # isn't viewable doesn't hold; so grab again once it's mapped.
+        dlg.bind("<Map>", lambda e: e.widget is dlg and _grab(dlg))
+        _grab(dlg)
         _take_focus(dlg)
         ttk.Label(dlg, text=self.STARTUP_WARNING, wraplength=440, justify="left",
                   padding=(16, 14, 16, 8)).pack(anchor="w")

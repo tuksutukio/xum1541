@@ -32,6 +32,13 @@ class StartupWarning(BusyApp):
     def hidden(self):
         return d._load_prefs().getboolean("startup", "hide_warning", fallback=False)
 
+    def test_modal(self):
+        dlg, _, ok = self.dialog()
+        self.root.update()
+        self.assertEqual(self.root.grab_current(), dlg)
+        self.assertIn("one drive on the serial bus", self.app.STARTUP_WARNING)
+        ok.invoke()
+
     def test_ok_without_the_tick_shows_it_again(self):
         dlg, _, ok = self.dialog()
         self.assertIn("own risk", self.app.STARTUP_WARNING)
