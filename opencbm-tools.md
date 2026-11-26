@@ -214,6 +214,8 @@ cbmctrl [OPTIONS] ACTION [ACTION_ARGS]
 Useful actions:
 - `detect` — detect all drives on IEC bus. The model can be several words: a light beige 1541
   (2026-11-26) shows as ` 8: 1540 or 1541`, since opencbm can't tell the two apart by ROM
+  Two drives set to the same unit answer together and garble the ROM reads: a 1541 and a 1571 both on 8
+  gave ` 8: *unknown*, footprint=<@B@@>` (2026-11-26). An unknown model with a footprint hints at a clash.
 - `dir N` — list directory of drive N
 - `status N` — get drive status
 - `reset` — reset all drives on IEC bus
