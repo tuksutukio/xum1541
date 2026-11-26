@@ -914,9 +914,18 @@ def _cbm_dir_once(drive):
     if r is None:
         return "Error: cbmctrl dir didn't answer in 30 s"
     rc, out = r[0], (r[1] or "").strip()
+    if rc != 0 and not out:
+        # What a switched-off or unplugged drive looks like: exit 1, no output.
+        return NO_ANSWER.format(drive=drive)
     if rc != 0:
-        return f"Error: {out.splitlines()[-1] if out else f'cbmctrl dir exited {rc}'}"
+        return f"Error: {out.splitlines()[-1]}"
     return out
+
+
+NO_ANSWER = "Error: drive {drive} doesn't answer. Is it switched on and connected?"
+NO_DRIVE = ("Error: no drive answers on the bus. Switch one on (or check the cable), "
+            "then use Drive → Detect.")
+OTHER_DRIVES = "Error: drive {drive} doesn't answer. {others} {verb}: choose it in the Drive menu."
 
 
 def cbm_dir(drive=None):
@@ -928,6 +937,14 @@ def cbm_dir(drive=None):
         log_event(f"--- 74 on drive {drive}: bump, seek track 18, initialise, read again")
         recover_head()
         out = _cbm_dir_once(drive)
+    if out == NO_ANSWER.format(drive=drive):
+        # Is it this drive or the whole bus? A detect takes 0.1 s and tells.
+        others = [u for u, _ in parse_detect(cbm_detect())]
+        if not others:
+            return NO_DRIVE
+        return OTHER_DRIVES.format(drive=drive, verb="answers" if len(others) == 1 else "answer",
+                                   others="Drive " + ", ".join(others) if len(others) == 1
+                                   else "Drives " + ", ".join(others))
     return out
 
 
@@ -1625,9 +1642,14 @@ class CbmDirPane(ttk.Frame):
     def _apply_dir(self, raw):
         """Apply a raw cbm_dir result to the UI. Must be called on the main thread."""
         if raw.startswith("Error"):
-            self._hdr.set(f"{DRIVE}:  error")
-            self._status.set(raw)
+            app = self.winfo_toplevel()
+            no_answer = raw == NO_DRIVE or raw.startswith(f"Error: drive {DRIVE} doesn't answer")
+            self._hdr.set(f"{DRIVE}:  no answer" if no_answer else f"{DRIVE}:  error")
+            self._status.set("")
             self._sel_status.set("")
+            app._set_status(raw[len("Error: "):])
+            if raw == NO_DRIVE:
+                app._have_drives = False     # the dot turns grey at the end of the refresh
             return
         disk_name, disk_id, entries, blocks_free = parse_cbm_dir(raw)
         self.disk_name = disk_name     # last disk name read; the header text can say "refreshing…"
@@ -1812,12 +1834,16 @@ class DiskMasher(tk.Tk):
         self._busy_dot.itemconfigure(self._busy_oval, state="normal" if on else "hidden")
         self._busy_blink = self.after(500, self._blink)
 
-    def _start_op(self, label, target, local=False):
+    def _start_op(self, label, target, local=False, fresh=False):
         """Run `target` in a worker thread as a drive operation. Call from the Tk thread.
         Operations started while one runs (a refresh at its end, Cancel's recovery) count
         as part of it; the bus is free again when the count is back to 0. local=True: the
         operation reads from or writes into the left pane's folder, so that pane is frozen
-        until it ends (other operations leave it usable)."""
+        until it ends (other operations leave it usable). fresh=True: reset the bus first
+        (reset_and_settle), so the operation starts from a known drive state: transfer tools
+        leave a 1571 in states that trip up the next command (2 MHz after d64copy/cbmread,
+        71 after a Copy), and a reset always cured them. Operations whose worker already
+        starts with a reset (disk check, d64copy, erase, Make first, Format) don't need it."""
         self._ops += 1
         if self._ops == 1:
             self._op_label = label
@@ -1829,6 +1855,8 @@ class DiskMasher(tk.Tk):
 
         def wrapper():
             try:
+                if fresh:
+                    reset_and_settle()
                 target()
             finally:
                 self.after(0, lambda: self._end_op(local))
@@ -1944,9 +1972,17 @@ class DiskMasher(tk.Tk):
             fs = state["frac_since"]
             if state["determinate"] and fs:
                 t0, f0, f1 = fs
-                rate = (f1 - f0) / max(0.001, time.monotonic() - t0)
-                if f1 > f0 + 0.05 and rate > 0:
-                    left = int((1 - f1) / rate)
+                ran = time.monotonic() - t0
+                rate = (f1 - f0) / max(0.001, ran)
+                est = state.setdefault("estimates", [])
+                if rate > 0:
+                    est.append((1 - f1) / rate)
+                    del est[:-5]
+                # Shown only once it has settled (Antti, 2026-11-26): the step has run
+                # 15 s and is 10 % done, and the last five estimates agree within 20 %.
+                if (ran >= 15 and f1 >= f0 + 0.10 and len(est) == 5
+                        and max(est) <= 1.2 * min(est)):
+                    left = int(est[-1])
                     text += f"  ·  about {left // 60}:{left % 60:02d} left"
             time_var.set(text)
             dlg.after(1000, _tick)
@@ -1985,6 +2021,7 @@ class DiskMasher(tk.Tk):
                 if not dlg.winfo_exists():
                     return
                 msg_var.set(msg)
+                new_step = detail is not None and detail != detail_var.get()
                 if detail is not None:
                     detail_var.set(detail)
                 if fraction is None:
@@ -1999,8 +2036,15 @@ class DiskMasher(tk.Tk):
                         state.update(determinate=True,
                                      frac_since=(time.monotonic(), fraction, fraction))
                     else:
-                        t0, f0, _ = state["frac_since"]
-                        state["frac_since"] = (t0, f0, fraction)
+                        t0, f0, f_prev = state["frac_since"]
+                        if new_step or fraction < f_prev:
+                            # A new step starts over: measure its own pace, not the last
+                            # step's (Sort's step 3 inherited step 2's start and showed
+                            # 25 minutes left for a 5-minute read, 2026-11-26).
+                            state["frac_since"] = (time.monotonic(), fraction, fraction)
+                            state["estimates"] = []
+                        else:
+                            state["frac_since"] = (t0, f0, fraction)
                     pb.configure(value=int(fraction * 1000))
             self.after(0, _apply)
 
@@ -2081,7 +2125,8 @@ class DiskMasher(tk.Tk):
                 else:
                     found = ", ".join(f"{u}: {m}" for u, m in drives)
                     units = [u for u, _ in drives]
-                    if units and DRIVE not in units and self._select_drive(units[0], refresh=False):
+                    if units and DRIVE not in units and self._select_drive(units[0], refresh=False,
+                                                                           by_detect=True):
                         self._set_status(f"Detected {found}. Drive {units[0]} selected "
                                          f"(no drive answers at the previous one).")
                     else:
@@ -2091,15 +2136,20 @@ class DiskMasher(tk.Tk):
             self.after(0, _done)
         self._start_op('Detecting drives', _run)
 
-    def _select_drive(self, unit, refresh=True):
-        """Make `unit` the drive every operation uses. Refused while an operation window is
-        open, so a running Sort or copy can't switch drives halfway. Returns True if switched."""
+    def _select_drive(self, unit, refresh=True, by_detect=False):
+        """Make `unit` the drive every operation uses. Refused while an operation runs or its
+        window is open, so a running Sort or copy can't switch drives halfway. by_detect:
+        called from Detect's own finish, which still counts as running, so the running
+        count is ignored (2026-11-26: with drive 9 off, Detect found only 8 and refused to
+        switch to it "while an operation runs", the Detect itself). Finished progress
+        windows are closed rather than blocking. Returns True if switched."""
         global DRIVE
         unit = str(unit)
         if unit == DRIVE:
             return True
-        busy = self._ops or [w for w in self.winfo_children()
-                             if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+        self._close_stale()
+        busy = (self._ops and not by_detect) or [
+            w for w in self.winfo_children() if isinstance(w, tk.Toplevel) and w.winfo_exists()]
         if busy:
             self.cbm_pane.drive_var.set(DRIVE)
             messagebox.showinfo("Drive in use",
@@ -2130,7 +2180,8 @@ class DiskMasher(tk.Tk):
             def _done():
                 close()
                 self.cbm_pane._apply_dir(raw)
-                self._set_status("Refreshed.")
+                if not raw.startswith("Error"):     # else _apply_dir said what's wrong
+                    self._set_status("Refreshed.")
             self.after(0, _done)
         self._start_op('Refreshing', _run)
 
@@ -2247,7 +2298,7 @@ class DiskMasher(tk.Tk):
                 self.cbm_pane.refresh()
             self.after(0, done)
 
-        self._start_op("Copying" if copy else "Renaming", run)
+        self._start_op("Copying" if copy else "Renaming", run, fresh=True)
 
     def _scratch_files(self):
         entries = self.cbm_pane.selected_entries()
@@ -2310,7 +2361,7 @@ class DiskMasher(tk.Tk):
                     self._set_status(f"Scratched {total} file{'s' if total > 1 else ''}.")
             self.after(0, done)
 
-        self._start_op('Scratching', run)
+        self._start_op('Scratching', run, fresh=True)
 
     def _read_from_cbm(self):
         entries = self.cbm_pane.selected_entries()
@@ -2350,7 +2401,7 @@ class DiskMasher(tk.Tk):
                                      (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        self._start_op('Reading files', run, local=True)
+        self._start_op('Reading files', run, local=True, fresh=True)
 
     def _read_to_image(self):
         left_files = self.fs_pane.selected_files()
@@ -2447,7 +2498,7 @@ class DiskMasher(tk.Tk):
                         (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        self._start_op('Reading to image', run, local=True)
+        self._start_op('Reading to image', run, local=True, fresh=True)
 
     def _write_to_cbm(self):
         files = self.fs_pane.selected_files()
@@ -2502,7 +2553,7 @@ class DiskMasher(tk.Tk):
                                      (f" ({len(errors)} error(s))" if errors else "."))
             self.after(0, done)
 
-        self._start_op('Writing files', run, local=True)
+        self._start_op('Writing files', run, local=True, fresh=True)
 
     def _write_image_to_cbm(self, path):
         size     = os.path.getsize(path)
@@ -3305,10 +3356,13 @@ class DiskMasher(tk.Tk):
                     # "NNN-<name>" (NNN = directory position), so two entries with the same
                     # name can't overwrite each other and the rescue folder keeps the order.
                     det3 = f"Step 3 of {steps} · Reading files"
+                    # Progress by blocks, not files: a 1-block file and a 117-block one
+                    # take very different times.
+                    w3 = [max(1, blk) for blk, _, _ in snap]
                     for i, (blk, name, ftype) in enumerate(snap, 1):
                         if cancel_event.is_set():
                             return
-                        set_msg(f"[{i}/{len(snap)}]  {cbm_display(name)}", fraction=(i - 1) / len(snap), detail=det3)
+                        set_msg(f"[{i}/{len(snap)}]  {cbm_display(name)}", fraction=sum(w3[:i - 1]) / sum(w3), detail=det3)
                         sub = tempfile.mkdtemp(dir=tmpdir)
                         err = cbm_read_file(DRIVE, name, sub, proc_store, ftype)
                         got = os.listdir(sub)
@@ -3326,16 +3380,27 @@ class DiskMasher(tk.Tk):
                     # --- Step 4: scratch ---
                     det4 = f"Step 4 of {steps} · Rewriting the disk"
                     set_msg("Scratching all files…", detail=det4)
+                    # No reset here: it made the scratch run at 1 MHz (170 s instead of 66 s
+                    # for 13 files on a 1571) and didn't help. The count in the reply isn't
+                    # reliable on a 1571 (long scratches report 22, 42, "5;" for 6, 10 and 13
+                    # files, at 1 and 2 MHz alike; short ones are right), so the empty
+                    # directory below is the proof (2026-11-26, drive 9).
                     outcome["touched"] = True
                     _run_bounded(["cbmctrl", "command", DRIVE, "S:*"], 30)
                     # Wait for the drive to finish before any other bus request, then
-                    # check it scratched every file ("01, FILES SCRATCHED,nn") and that a
-                    # real directory listing (not an error) shows none left.
-                    code, st = drive_status()
+                    # check it scratched ("01, FILES SCRATCHED,nn") and that a real
+                    # directory listing (not an error) shows no file left. The listing is
+                    # the proof; a count that doesn't match or can't be read is logged.
+                    # A full-disk scratch takes over two minutes at 1 MHz on a 1571
+                    # (170 s for 13 files, 2026-11-26); wait up to 10 minutes.
+                    code, st = drive_status(timeout=600)
                     m = re.match(r'\s*01\s*,[^,]*,\s*(\d+)', st)
-                    if code != 1 or not m or int(m.group(1)) != len(snap):
+                    if code == 1 and (not m or int(m.group(1)) != len(snap)):
+                        log_event(f"--- scratch status count unexpected ({st!r}, "
+                                  f"{len(snap)} files): checking the directory instead")
+                    if code != 1:
                         outcome["errors"].append(
-                            f"Scratch didn't remove all {len(snap)} files (drive status: {st}). "
+                            f"The scratch failed (drive status: {st}). "
                             "Nothing was written.")
                         return
                     raw = cbm_dir(DRIVE)
@@ -3355,10 +3420,13 @@ class DiskMasher(tk.Tk):
                     # write_order holds the same tuples as snap; `is` keeps duplicates apart.
                     idx = next(i for i, e in enumerate(snap) if e is entry)
                     jobs.append((entry[1], local_copy.get(idx, "")))
+                w4 = [max(1, (os.path.getsize(p) + 253) // 254) if os.path.exists(p) else 1
+                      for _, p in jobs]               # blocks, as in step 3
                 for i, (name, local) in enumerate(jobs, 1):
                     if cancel_event.is_set():
                         return
-                    set_msg(f"[{i}/{len(jobs)}]  Writing {cbm_display(name)}", fraction=(i - 1) / len(jobs), detail=det4)
+                    set_msg(f"[{i}/{len(jobs)}]  Writing {cbm_display(name)}",
+                            fraction=sum(w4[:i - 1]) / sum(w4), detail=det4)
                     if not os.path.exists(local):
                         outcome["errors"].append(f"{cbm_display(name)}: local copy missing")
                         continue

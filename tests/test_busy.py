@@ -198,6 +198,12 @@ class ResetBus(FakeTools, BusyApp):
         self.assertIn("Reset — bus OK (8: 1571)", self.app._sv.get())
         self.assertEqual(self.busy(), "green")
 
+    def test_fresh_operation_resets_first(self):
+        self.app._start_op("Writing files", lambda: d.drive_status(), fresh=True)
+        self.pump(lambda: self.app._ops == 0)
+        self.assertEqual([c for c in self.calls() if c.startswith("cbmctrl")],
+                         ["cbmctrl reset", "cbmctrl status 8"])
+
     def test_no_drive_answers(self):
         self.scenario(detect="")
         self.app._reset_bus()

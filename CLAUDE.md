@@ -50,7 +50,10 @@ to disk (`FB_PATHS` maps platform → files).
   Operations started during one (Cancel's recovery, a follow-up reset) count as part of it. Pass `local=True`
   when the operation reads from or writes into the left pane's folder: the left pane is frozen (`set_frozen`: a
   "Frozen" bindtag swallows clicks and keys, the listbox stays enabled so `_load` can refill it). Task dialogs and
-  the spinner aren't modal (no grab); the busy flag does that job. `c1541` threads stay
+  the spinner aren't modal (no grab); the busy flag does that job. Pass `fresh=True` for an operation whose
+  worker doesn't already start with a reset (Write/Read files, Read to image, Scratch, Rename/Copy): `_start_op`
+  runs `reset_and_settle()` first. Don't reset between Sort's file reads and its scratch: at 1 MHz the scratch takes
+  2.5× as long and gains nothing (opencbm-tools.md "FILES SCRATCHED count"). `c1541` threads stay
   plain threads. Tested in `tests/test_busy.py`.
 - **Drive → Reset and Cancel share `_reset_and_check`:** `cbmctrl reset`, 2 s settle, detect; drives found →
   drive menu updated + refresh (which recovers a 74 head via `cbm_dir`); no answer → replug USB; no drive → power/cable.

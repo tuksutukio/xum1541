@@ -61,6 +61,18 @@ Key options:
 - `cbmctrl command` sends its text raw (no PETSCII conversion): file names in a DOS command must be uppercase
   ASCII (`S0:SEQTEST`). Lowercase names match nothing, and the drive still answers `01, FILES SCRATCHED,00`.
 
+**`cbmread` leaves a 1571 at 2 MHz too** (2026-11-26, drive 9): VIA 1 `$1801` read `$99` after a reset and `$38`
+after one `cbmread` (bit 5, believed to be the 1/2 MHz select, set). In that state 15 status reads and 5 directory
+reads all came back clean, and DOS commands run about twice as fast (a 13-file scratch: 66 s, against 170 s after a
+reset).
+
+**The 1571's `FILES SCRATCHED` count is unreliable for long scratches** (2026-11-26, drive 9, at 1 and 2 MHz alike):
+1, 2, 3 and 4 files reported `01`–`04` correctly (up to 31 s), but 6 large files reported `22`, 10 files `42` and
+13 files `5;` (not even a decimal digit; the drive converts the count with SED/ADC and prints the nibbles,
+anatomy-of-the-1541 p.216). The scratch itself was complete and the BAM consistent every time. Suspected: the
+counter (`$86`, anatomy p.144) is reused during long scratches; not checked in the 1571 ROM. Check the directory, not
+the count.
+
 **After the drive's own Copy or Rename (`cbmctrl command <unit> C0:NEW=OLD` / `R0:NEW=OLD`, 2026-11-26, drive 9, 1571):**
 the commands themselves worked (types kept), but the next `cbmwrite`s failed with `71,DIR ERROR,01,04`, even after
 `I`. The BAM on the disk was consistent (counts matched bitmaps). A `cbmctrl reset` fixed it at once. One failed

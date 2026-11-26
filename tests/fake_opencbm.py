@@ -96,7 +96,12 @@ def cbmctrl(args, sc):
     elif cmd == "command":
         pass
     elif cmd == "dir":
-        print(_next(sc, "dir", '0 ."empty" 01 2a\n664 blocks free.'))
+        v = _next(sc, "dir", '0 ."empty" 01 2a\n664 blocks free.')
+        if isinstance(v, dict):                 # {"out": ..., "rc": ...}
+            if v.get("out"):
+                print(v["out"])
+            return v.get("rc", 0)
+        print(v)
     elif cmd == "upload":
         addr, path = int(args[2], 0), args[3]
         data = _bytes(path)

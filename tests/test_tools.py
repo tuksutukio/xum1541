@@ -65,6 +65,17 @@ class Wrappers(FakeTools):
         self.scenario(detect="")                     # no drive: empty, not an error
         self.assertEqual(d.cbm_detect(), "")
 
+    def test_dir_of_a_switched_off_drive(self):
+        self.scenario(dir={"out": "", "rc": 1})
+        self.assertEqual(d._cbm_dir_once("8"), d.NO_ANSWER.format(drive="8"))
+
+    def test_refresh_tells_drive_from_bus(self):
+        self.scenario(dir={"out": "", "rc": 1}, detect="")
+        self.assertEqual(d.cbm_dir("8"), d.NO_DRIVE)
+        self.scenario(dir={"out": "", "rc": 1}, detect=" 9: 1571")
+        self.assertEqual(d.cbm_dir("8"), "Error: drive 8 doesn't answer. Drive 9 answers: "
+                                         "choose it in the Drive menu.")
+
     def test_dir_74_is_text_not_an_error(self):
         self.scenario(dir="74,drive not ready,00,00")
         self.assertEqual(d._cbm_dir_once("9"), "74,drive not ready,00,00")
