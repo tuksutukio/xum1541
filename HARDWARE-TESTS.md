@@ -54,8 +54,8 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 | Read files (`cbmread`, PRG/SEQ/USR) | ✓ 2026-11-26 | — | ✓ 2026-11-25 |
 | Write files (`cbmwrite`) | ✗ 2026-11-26 after a scratch without reset (74) | ✗ 2026-11-25 after `d64copy` without reset (74) | ✓ 2026-11-25 |
 | Scratch, full disk (`S:*`) | ✓ 2026-11-26 (count right, 189 s) | — | ◐ 2026-11-26 (count unreliable) |
-| Rename / Copy (drive's R and C) | — | — | ◐ 2026-11-26 (next writes 71 until a reset) |
-| Make first | — | — | ✓ 2026-11-26 (shared engine, 12 s) |
+| Rename / Copy (drive's R and C) | ◐ 2026-11-26 (next writes 71 until a reset, as on the 1571) | — | ◐ 2026-11-26 (next writes 71 until a reset) |
+| Make first | ✓ 2026-11-26 (11.4 s, `LOAD"*"` checked) | — | ✓ 2026-11-26 (shared engine, 12 s) |
 | Sort (directory only) | ✓ 2026-11-26 | — | ✓ 2026-11-26 (12 s) |
 | Restore a directory backup | ✓ 2026-11-26 | — | ✓ 2026-11-26 (8.1 s) |
 | FB-ify (incl. replacing an FB) | ✓ 2026-11-26 | — | ✓ 2026-11-26 after a fix (replace got 74: head left on track 36) |

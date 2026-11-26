@@ -85,6 +85,12 @@ the commands themselves worked (types kept), but the next `cbmwrite`s failed wit
 `I`. The BAM on the disk was consistent (counts matched bitmaps). A `cbmctrl reset` fixed it at once. One failed
 write left a 1-block entry whose sector wasn't counted in the BAM (free count unchanged); a `V` (validate) cleans
 that up. Not yet known which of the two commands causes it; Diskmasher resets after both.
+**Both cause it, on a 1541 too** (2026-11-26, plain 1541 at 8, freshly rebuilt disk with a consistent BAM): after
+`C0:NOTES3=NOTES` and after `R0:NOTES4=NOTES3` (each `00, OK`), the next `cbmwrite` ended with `71,DIR ERROR`; each
+failed write left a 1-block entry whose block the BAM didn't count, so the next save could reuse it: a cross-link
+in the making (likely how NOTES and USERDATA came to share 2/0). After a `cbmctrl reset` the write worked and was
+counted. Guess, unchecked: the DOS keeps its updated BAM in drive RAM after C/R, while cbmwrite's drive code
+works from the disk's copy.
 
 **Disk facts seen with these tools (2026-11-25, 1571 in 1541 mode):**
 - The disk ID is in two places: the BAM (18/0 `$A2–$A3`, what a directory listing shows) and every sector header,
