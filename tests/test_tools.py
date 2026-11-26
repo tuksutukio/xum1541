@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 
-from _common import FakeTools, d, make_d64
+from _common import FakeTools, _bytes, d, make_d64
 
 FATAL_74 = ("[Info] writing x.prg -> x,p,w\n[Info] identified a 1571 drive\n"
             "[Fatal] could not open file for writing: 74,DRIVE NOT READY,18,00")
@@ -244,3 +244,22 @@ class DiskCheck(FakeTools):
             d._run_bounded = orig
         self.assertFalse(r["t36_checked"])
         self.assertFalse(r["t36_readable"])
+
+
+class WriteType(FakeTools):
+    """cbmwrite cuts the local name to 16 characters before reading its extension
+    (opencbm-tools.md); cbm_write_file passes the type itself with -f."""
+
+    def test_type_from_the_whole_extension(self):
+        img = self.write_file("disk.d64", make_d64(name="WORK"))
+        self.scenario(disk=img, dos=True)
+        cases = {"012-userdata2.usr": 0x83, "a-very-long-name.seq": 0x81, "game.prg": 0x82,
+                 "noextension": 0x82}
+        for i, name in enumerate(cases):
+            path = self.write_file(name, b"\x01\x08x")
+            self.assertIsNone(d.cbm_write_file("8", path, f"f{i}"))
+        types = [e[2] for _, e in d._listed_entries(_bytes(img))]
+        self.assertEqual(types, list(cases.values()))
+        writes = [c for c in self.calls() if c.startswith("cbmwrite")]
+        self.assertTrue(writes[0].startswith("cbmwrite -f U -o f0 8 "))
+        self.assertNotIn("-f", writes[3])                       # unknown extension: cbmwrite decides

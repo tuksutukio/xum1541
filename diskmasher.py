@@ -1311,9 +1311,17 @@ def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None, ftype=None):
         return str(e)
 
 
+WRITE_TYPES = {".prg": "P", ".seq": "S", ".usr": "U"}
+
+
 def cbm_write_file(drive, local_path, cbm_name=None, proc_store=None):
-    """Write a local file to CBM drive, optionally with a specific CBM filename."""
-    cmd = ["cbmwrite", "-o", cbm_name, drive, local_path] if cbm_name else ["cbmwrite", drive, local_path]
+    """Write a local file to CBM drive, optionally with a specific CBM filename. The file
+    type is passed explicitly (-f) from the local name's extension: cbmwrite itself cuts
+    the name to 16 characters before reading the extension, so "012-userdata2.usr" (17)
+    became a PRG (1541, 2026-11-26; opencbm-tools.md)."""
+    ftype = WRITE_TYPES.get(os.path.splitext(local_path)[1].lower())
+    cmd = (["cbmwrite"] + (["-f", ftype] if ftype else []) + (["-o", cbm_name] if cbm_name else [])
+           + [drive, local_path])
     started = time.monotonic()
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

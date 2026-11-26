@@ -80,6 +80,12 @@ second with `74,DRIVE NOT READY,18,00`. A 1541 has no 2 MHz mode, so the 1571's 
 whole story. Hypothesis, unchecked: the fast-transfer code `cbmread` uploads into drive RAM leaves the DOS
 unable to write until a reset. Sort now resets after the scratch.
 
+**`cbmwrite` reads the type from the local name cut to 16 characters** (2026-11-26, 1541): even with `-o`, it
+cuts the local file name to 16 characters before looking at the extension, so `012-userdata2.usr` (17
+characters) was written as a PRG, `010-userdata.usr` (16) as a USR; `abcdefghijklm.usr` (17) PRG,
+`abcdefghijkl.usr` (16) USR. `-f, --file-type` (D, P, S, U) sets the type explicitly and fixes it; Diskmasher's
+`cbm_write_file` passes `-f` from the whole extension (.prg/.seq/.usr).
+
 **After the drive's own Copy or Rename (`cbmctrl command <unit> C0:NEW=OLD` / `R0:NEW=OLD`, 2026-11-26, drive 9, 1571):**
 the commands themselves worked (types kept), but the next `cbmwrite`s failed with `71,DIR ERROR,01,04`, even after
 `I`. The BAM on the disk was consistent (counts matched bitmaps). A `cbmctrl reset` fixed it at once. One failed

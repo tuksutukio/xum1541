@@ -272,7 +272,13 @@ def cbmread(args, sc):
 def cbmwrite(args, sc):
     if sc.get("dos"):
         name = args[args.index("-o") + 1] if "-o" in args else os.path.basename(args[-1])
-        ftype = {".seq": 0x81, ".usr": 0x83}.get(os.path.splitext(args[-1])[1].lower(), 0x82)
+        # Like the real tool: -f sets the type; without it the type comes from the
+        # extension of the name cut to 16 characters (opencbm-tools.md).
+        if "-f" in args:
+            ftype = {"P": 0x82, "S": 0x81, "U": 0x83, "D": 0x80}[args[args.index("-f") + 1].upper()]
+        else:
+            ftype = {".seq": 0x81, ".usr": 0x83}.get(
+                os.path.splitext(os.path.basename(args[-1])[:16])[1].lower(), 0x82)
         img = _image(sc)
         err = _dos_write(img, name, _bytes(args[-1]), ftype)
         if err:
