@@ -3345,7 +3345,9 @@ class DiskMasher(tk.Tk):
         set_msg, close, cancel_event, proc_store = self._make_task_dialog(
             f"{verb} disk", "Starting…")
         self._set_status(f"{verb} disk…")
-        steps = (["image"] if image_path else []) + (["fb"] if fb_files else []) + ["dir"]
+        # One step per line of text the dialog shows, so the count goes up as the text changes.
+        steps = ((["check"] if image_path or fb_files else []) + (["image"] if image_path else [])
+                 + (["fb"] if fb_files else []) + ["dir"])
 
         def det(what):
             return f"Step {steps.index(what) + 1} of {len(steps)}"
@@ -3381,7 +3383,7 @@ class DiskMasher(tk.Tk):
                     # The disk check: the image needs it for 35/40 tracks, FB to refuse a
                     # double-sided disk (the file would be written by the drive's 1541-mode
                     # DOS, which knows one side only; untested, so not allowed).
-                    set_msg("Checking the disk…", detail=f"{det(steps[0])} · Checking the disk")
+                    set_msg("Reading tracks 18 and 36…", detail=f"{det('check')} · Checking the disk")
                     pr = probe_disk(proc_store, cancel_event)
                     if cancel_event.is_set():
                         return
@@ -3394,6 +3396,7 @@ class DiskMasher(tk.Tk):
                         return
                 if image_path:
                     d2 = f"{det('image')} · Saving a full disk image"
+                    set_msg("Starting…", detail=d2)
                     tracks = 40 if (pr["t36_readable"] or pr["t36_partial"]) else 35
                     part = image_path + ".part"
                     stats = {}

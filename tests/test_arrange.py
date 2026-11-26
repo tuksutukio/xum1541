@@ -47,7 +47,19 @@ class Arrange(FakeTools, BusyApp):
         # outside the main loop (the app always runs it; a test doesn't).
         self.dialogs = []
         make = d.DiskMasher._make_task_dialog.__get__(self.app)
-        self.app._make_task_dialog = lambda *a: self.dialogs.append(make(*a)) or self.dialogs[-1]
+        self.details = []
+
+        def make_recording(*a):
+            set_msg, *rest = make(*a)
+
+            def recording(msg, fraction=None, detail=None):
+                if detail:
+                    self.details.append(detail)
+                set_msg(msg, fraction=fraction, detail=detail)
+            recording.enter_critical = set_msg.enter_critical
+            self.dialogs.append((recording, *rest))
+            return self.dialogs[-1]
+        self.app._make_task_dialog = make_recording
         self.app.fs_pane._load = lambda: None
         self.errors = []
         self._err = d.messagebox.showerror
@@ -114,6 +126,13 @@ class Arrange(FakeTools, BusyApp):
         self.assertEqual(self.errors, [])
         self.assertEqual(_bytes(dest), self.original)
         self.assertEqual(self.names(), ["FB", "ALPHA", "ZED"])
+        # One step per text: the step number goes up whenever the text changes.
+        steps = list(dict.fromkeys(self.details))
+        self.assertEqual([x.split(" · ")[0] for x in steps],
+                         [f"Step {n} of 4" for n in range(1, 5)])
+        self.assertEqual([x.split(" · ")[1] for x in steps],
+                         ["Checking the disk", "Saving a full disk image", "Writing FB",
+                          "Rewriting the directory"])
         calls = self.calls()
         image = max(i for i, c in enumerate(calls) if c.startswith("d64copy"))
         write = next(i for i, c in enumerate(calls) if c.startswith("cbmwrite"))
