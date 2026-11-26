@@ -47,6 +47,9 @@ The window has two panes side by side.
   - Above the list: the drive number, the disk name and ID, and the menus **← Read**, **Drive**, **Disk** and
     **File**.
   - Below the list: file count and blocks free, and the size of the selection.
+
+**Copying names:** ⌘C copies the selected names to the clipboard, one per line. In the left pane ⇧⌘C copies their
+full paths instead. In the right pane both copy the names as shown.
 - **Status bar** (bottom): what the last operation did. The dot at its right end is green while the drive is
   idle, flashes red while it's working, and is grey when no drive answered the last scan (Detect, or the bus check
   after a Cancel). While it's red, the drive menus and **Write →** are greyed out: only

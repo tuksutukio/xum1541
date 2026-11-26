@@ -1012,6 +1012,20 @@ def restore_directory_backup(path):
     return None
 
 
+def _copy_to_clipboard(widget, lines, what):
+    """Put lines (one per line) on the clipboard and say so in the status bar. ⌘C / ⇧⌘C in
+    the panes (Antti, 2026-11-26)."""
+    app = widget.winfo_toplevel()
+    if not lines:
+        if hasattr(app, "_set_status"):
+            app._set_status("Nothing selected to copy.")
+        return
+    app.clipboard_clear()
+    app.clipboard_append("\n".join(lines))
+    if hasattr(app, "_set_status"):
+        app._set_status(f"Copied {lines[0]}" if len(lines) == 1 else f"Copied {len(lines)} {what}.")
+
+
 def _grab(dlg):
     """grab_set() if Tk allows it now (not while the window isn't viewable)."""
     try:
@@ -1400,6 +1414,9 @@ class FilesystemPane(ttk.Frame):
         self.lb.bind("<Return>",          self._on_double)
         self.lb.bind("<Command-Up>",      lambda e: self._go_up())
         self.lb.bind("<Command-BackSpace>", lambda e: self._trash_selected())
+        self.lb.bind("<Command-c>",       lambda e: self.copy_selected(full=False) or "break")
+        for seq in ("<Command-C>", "<Shift-Command-c>", "<Shift-Command-C>"):
+            self.lb.bind(seq, lambda e: self.copy_selected(full=True) or "break")
         self.lb.bind("<<ListboxSelect>>", lambda e: self._update_sel())
         self.lb.bind("<Button-1>",        lambda e: self.after(0, lambda: _deselect_if_empty(self.lb, e.y, self._update_sel)))
         _bind_mac_multiselect(self.lb)
@@ -1766,6 +1783,13 @@ class FilesystemPane(ttk.Frame):
     def current_dir(self):
         return self._path
 
+    def copy_selected(self, full):
+        """⌘C: the selected names; ⇧⌘C (full=True): their full paths. Folders too, not "..";
+        one per line."""
+        picked = [self._entries[i] for i in self.lb.curselection() if self._entries[i][0] != ".."]
+        _copy_to_clipboard(self, [path if full else name for name, _, path in picked],
+                           "paths" if full else "names")
+
     def selected_files(self):
         """Return list of (name, path) for selected non-directory entries."""
         result = []
@@ -1783,6 +1807,12 @@ class CbmDirPane(ttk.Frame):
         super().__init__(parent, **kw)
         self._entries = []
         self._build()
+
+    def copy_selected(self):
+        """⌘C (and ⇧⌘C: a file on the drive has no Mac path): the selected names as shown,
+        upper case as on a Commodore; one per line."""
+        _copy_to_clipboard(self, [cbm_display(self._entries[i][1]) for i in self.lb.curselection()],
+                           "names")
 
     def _build(self):
         self._hdr = tk.StringVar(value=f"{DRIVE}:  (not refreshed)")
@@ -1850,6 +1880,8 @@ class CbmDirPane(ttk.Frame):
         self.lb.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         self.lb.bind("<<ListboxSelect>>", lambda e: self._update_sel_status())
+        for seq in ("<Command-c>", "<Command-C>", "<Shift-Command-c>", "<Shift-Command-C>"):
+            self.lb.bind(seq, lambda e: self.copy_selected() or "break")
         self.lb.bind("<Button-1>",        lambda e: self.after(0, lambda: _deselect_if_empty(self.lb, e.y, self._update_sel_status)))
         _bind_mac_multiselect(self.lb)
 
