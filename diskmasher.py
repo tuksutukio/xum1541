@@ -1966,17 +1966,20 @@ class DiskMasher(tk.Tk):
         if not _load_prefs().getboolean("startup", "hide_warning", fallback=False):
             self.after(300, self._show_startup_warning)
 
-    STARTUP_WARNING = (
-        "Diskmasher works with real floppy disks, many of them 30 to 40 years old.\n\n"
+    STARTUP_PARAGRAPHS = (
+        "Diskmasher works with real floppy disks, many of them 30 to 40 years old.",
         "Old magnetic media is fragile. The coating weakens and can start to shed, and any "
         "read or write, even in a healthy drive, can damage such a disk beyond repair. A "
-        "shedding disk can also leave dirt on the drive's head that harms the next disk.\n\n"
-        "• Read a disk to an image before writing to it, if its contents matter.\n"
-        "• Keep rare originals write-protected (opaque tape over the notch).\n"
-        "• If a disk scrapes, squeaks or reads with many errors, stop and clean the head.\n"
-        "• For best results, have only one drive on the serial bus at a time: switch the "
-        "others off and unplug them (a switched-off drive can still load the bus).\n\n"
-        "You use Diskmasher at your own risk.")
+        "shedding disk can also leave dirt on the drive's head that harms the next disk.")
+    STARTUP_BULLETS = (
+        "Read a disk to an image before writing to it, if its contents matter.",
+        "Keep rare originals write-protected (opaque tape over the notch).",
+        "If a disk scrapes, squeaks or reads with many errors, stop and clean the head.",
+        "For best results, have only one drive on the serial bus at a time: switch the "
+        "others off and unplug them (a switched-off drive can still load the bus).")
+    STARTUP_CLOSING = "You use Diskmasher at your own risk."
+    STARTUP_WARNING = "\n\n".join(STARTUP_PARAGRAPHS + ("\n".join("• " + b for b in STARTUP_BULLETS),
+                                                        STARTUP_CLOSING))
 
     def _show_startup_warning(self):
         """The warning about old media at start-up, until "Don't show again" is ticked
@@ -1991,10 +1994,22 @@ class DiskMasher(tk.Tk):
         dlg.bind("<Map>", lambda e: e.widget is dlg and _grab(dlg))
         _grab(dlg)
         _take_focus(dlg)
-        ttk.Label(dlg, text=self.STARTUP_WARNING, wraplength=440, justify="left",
-                  padding=(16, 14, 16, 8)).pack(anchor="w")
+        # Paragraphs as labels, bullets as a "•" column beside a wrapped text column, so a
+        # wrapped bullet line starts under its text, not under the bullet.
+        body = ttk.Frame(dlg, padding=(18, 16, 18, 6))
+        body.pack(fill="x")
+        width = 460
+        for text in self.STARTUP_PARAGRAPHS:
+            ttk.Label(body, text=text, wraplength=width, justify="left").pack(anchor="w", pady=(0, 10))
+        bullets = ttk.Frame(body)
+        bullets.pack(anchor="w", fill="x", pady=(0, 10))
+        for i, text in enumerate(self.STARTUP_BULLETS):
+            ttk.Label(bullets, text="•").grid(row=i, column=0, sticky="nw", padx=(4, 8), pady=(0, 4))
+            ttk.Label(bullets, text=text, wraplength=width - 24, justify="left").grid(
+                row=i, column=1, sticky="w", pady=(0, 4))
+        ttk.Label(body, text=self.STARTUP_CLOSING, wraplength=width, justify="left").pack(anchor="w")
         hide = tk.BooleanVar(value=False)
-        row = ttk.Frame(dlg, padding=(16, 0, 16, 12))
+        row = ttk.Frame(dlg, padding=(18, 4, 18, 14))
         row.pack(fill="x")
         ttk.Checkbutton(row, text="Don't show again", variable=hide).pack(side="left")
 

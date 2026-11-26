@@ -14,7 +14,8 @@ class StartupWarning(BusyApp):
         super().setUp()
         self._prefs = d.PREFS_FILE
         d.PREFS_FILE = os.path.join(tempfile.mkdtemp(), "prefs.ini")
-        self.app.STARTUP_WARNING = d.DiskMasher.STARTUP_WARNING
+        for name in ("STARTUP_WARNING", "STARTUP_PARAGRAPHS", "STARTUP_BULLETS", "STARTUP_CLOSING"):
+            setattr(self.app, name, getattr(d.DiskMasher, name))
         self.app._show_startup_warning = d.DiskMasher._show_startup_warning.__get__(self.app)
 
     def tearDown(self):
