@@ -1415,6 +1415,7 @@ class FilesystemPane(ttk.Frame):
         self.lb.bind("<Command-Up>",      lambda e: self._go_up())
         self.lb.bind("<Command-BackSpace>", lambda e: self._trash_selected())
         self.lb.bind("<Command-c>",       lambda e: self.copy_selected(full=False) or "break")
+        self.lb.bind("<Command-v>",       lambda e: self.paste_locate() or "break")
         for seq in ("<Command-C>", "<Shift-Command-c>", "<Shift-Command-C>"):
             self.lb.bind(seq, lambda e: self.copy_selected(full=True) or "break")
         self.lb.bind("<<ListboxSelect>>", lambda e: self._update_sel())
@@ -1782,6 +1783,64 @@ class FilesystemPane(ttk.Frame):
 
     def current_dir(self):
         return self._path
+
+    def paste_locate(self):
+        """⌘V (Antti, 2026-11-26): find what the clipboard names and select it. A full path
+        (one line or several; ~ allowed) opens its folder first; bare names are looked up
+        in the current folder, exact first, then ignoring case. The status bar says what
+        wasn't found, and when a file exists but isn't listed (not a Commodore file)."""
+        app = self.winfo_toplevel()
+        say = getattr(app, "_set_status", lambda t: None)
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            say("The clipboard has no text to look for.")
+            return
+        wanted = []
+        for line in text.splitlines():
+            line = line.strip().strip("'\"")
+            if not line:
+                continue
+            p = os.path.expanduser(line).rstrip("/") or "/"
+            wanted.append(os.path.split(p) if os.path.isabs(p) else (None, line))
+        if not wanted:
+            say("The clipboard has no text to look for.")
+            return
+        folder = next((f for f, _ in wanted if f), None)
+        if folder is not None:
+            if not os.path.isdir(folder):
+                say(f"No such folder: {folder}")
+                return
+            if os.path.normpath(folder) != os.path.normpath(self._path):
+                self._path = folder
+                self._load()
+        names = [e[0] for e in self._entries]
+        self.lb.selection_clear(0, tk.END)
+        found, missing, hidden = [], [], []
+        for f, n in wanted:
+            if f is not None and os.path.normpath(f) != os.path.normpath(self._path):
+                missing.append(n)
+                continue
+            i = names.index(n) if n in names else next(
+                (k for k, x in enumerate(names) if x.lower() == n.lower() and x != ".."), None)
+            if i is not None:
+                found.append(i)
+            elif os.path.exists(os.path.join(self._path, n)):
+                hidden.append(n)
+            else:
+                missing.append(n)
+        for i in found:
+            self.lb.selection_set(i)
+        if found:
+            self.lb.see(found[0])
+            self.lb.activate(found[0])
+        self._update_sel()
+        notes = []
+        if hidden:          # file names stay exactly as they are: no capitalising
+            notes.append(f"Here but not listed (not a Commodore file): {', '.join(hidden)}.")
+        if missing:
+            notes.append(f"Not found: {', '.join(missing)}.")
+        say(" ".join([f"Selected {len(found)}." if found else "Nothing selected."] + notes))
 
     def copy_selected(self, full):
         """⌘C: the selected names; ⇧⌘C (full=True): their full paths. Folders too, not "..";

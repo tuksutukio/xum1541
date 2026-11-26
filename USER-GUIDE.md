@@ -50,6 +50,11 @@ The window has two panes side by side.
 
 **Copying names:** ⌘C copies the selected names to the clipboard, one per line. In the left pane ⇧⌘C copies their
 full paths instead. In the right pane both copy the names as shown.
+
+**Finding a file:** in the left pane, ⌘V looks for what's on the clipboard and selects it. A full path (from ⇧⌘C,
+or Finder's Copy as Pathname) opens its folder first; a bare name is looked up in the current folder, ignoring
+case if there's no exact match. Several lines select several items. The status bar says what wasn't found, or
+that a file is there but not listed because it isn't a Commodore file.
 - **Status bar** (bottom): what the last operation did. The dot at its right end is green while the drive is
   idle, flashes red while it's working, and is grey when no drive answered the last scan (Detect, or the bus check
   after a Cancel). While it's red, the drive menus and **Write →** are greyed out: only

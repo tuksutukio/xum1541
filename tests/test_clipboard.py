@@ -29,6 +29,40 @@ class Clipboard(BusyApp):
         pane.copy_selected(full=False)
         self.assertIn("Nothing selected", self.app._sv.get())
 
+    def paste(self, pane, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        pane.paste_locate()
+        return [pane._entries[i][0] for i in pane.lb.curselection()]
+
+    def test_paste_finds_and_selects(self):
+        top = tempfile.mkdtemp()
+        sub = os.path.join(top, "disks")
+        os.mkdir(sub)
+        for n in ("Game.d64", "other.prg", "readme.txt"):
+            open(os.path.join(sub, n), "w").close()
+        pane = d.FilesystemPane(self.root)
+        pane._path = top
+        pane._load()
+        # A full path opens its folder and selects the file.
+        self.assertEqual(self.paste(pane, os.path.join(sub, "Game.d64")), ["Game.d64"])
+        self.assertEqual(pane._path, sub)
+        # Bare names, several lines, case ignored when there's no exact match.
+        self.assertEqual(self.paste(pane, "game.d64\nother.prg\n"), ["Game.d64", "other.prg"])
+        # A folder by full path is selected in its parent.
+        self.assertEqual(self.paste(pane, sub + "/"), ["disks"])
+        self.assertEqual(pane._path, top)
+        # Missing, and present but not listed.
+        pane._path = sub
+        pane._load()
+        self.assertEqual(self.paste(pane, "nothere.prg\nreadme.txt"), [])
+        self.assertIn("Not found: nothere.prg.", self.app._sv.get())
+        self.assertIn("not a Commodore file): readme.txt.", self.app._sv.get())
+        # No such folder: the pane stays where it is.
+        self.paste(pane, "/no/such/folder/x.d64")
+        self.assertEqual(pane._path, sub)
+        self.assertIn("No such folder", self.app._sv.get())
+
     def test_right_pane_names_as_shown(self):
         pane = d.CbmDirPane(self.root)
         pane._entries = [(34, "matrix", "prg"), (1, "notes", "seq")]
