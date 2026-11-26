@@ -1415,7 +1415,9 @@ class FilesystemPane(ttk.Frame):
         self.lb.bind("<Command-Up>",      lambda e: self._go_up())
         self.lb.bind("<Command-BackSpace>", lambda e: self._trash_selected())
         self.lb.bind("<Command-c>",       lambda e: self.copy_selected(full=False) or "break")
-        self.lb.bind("<Command-v>",       lambda e: self.paste_locate() or "break")
+        self.lb.bind("<Command-v>",       lambda e: self.paste_locate(follow=False) or "break")
+        for seq in ("<Command-V>", "<Shift-Command-v>", "<Shift-Command-V>"):
+            self.lb.bind(seq, lambda e: self.paste_locate(follow=True) or "break")
         for seq in ("<Command-C>", "<Shift-Command-c>", "<Shift-Command-C>"):
             self.lb.bind(seq, lambda e: self.copy_selected(full=True) or "break")
         self.lb.bind("<<ListboxSelect>>", lambda e: self._update_sel())
@@ -1784,11 +1786,13 @@ class FilesystemPane(ttk.Frame):
     def current_dir(self):
         return self._path
 
-    def paste_locate(self):
-        """⌘V (Antti, 2026-11-26): find what the clipboard names and select it. A full path
-        (one line or several; ~ allowed) opens its folder first; bare names are looked up
-        in the current folder, exact first, then ignoring case. The status bar says what
-        wasn't found, and when a file exists but isn't listed (not a Commodore file)."""
+    def paste_locate(self, follow=False):
+        """Find what the clipboard names and select it (Antti, 2026-11-26). ⌘V (follow=False):
+        file names in the current folder only; a full path counts by its last part. ⇧⌘V
+        (follow=True): paths; the pane opens the folder of the first full path (~ allowed)
+        first. Lookup: exact, then ignoring case. The status bar says what wasn't found, and
+        when a file exists but isn't listed (not a Commodore file). Antti's rule: ⌘ for
+        files, ⇧⌘ for paths and folders, as with ⌘C / ⇧⌘C."""
         app = self.winfo_toplevel()
         say = getattr(app, "_set_status", lambda t: None)
         try:
@@ -1802,11 +1806,14 @@ class FilesystemPane(ttk.Frame):
             if not line:
                 continue
             p = os.path.expanduser(line).rstrip("/") or "/"
-            wanted.append(os.path.split(p) if os.path.isabs(p) else (None, line))
+            folder_, name_ = os.path.split(p) if os.path.isabs(p) else (None, line)
+            wanted.append((folder_ if follow else None, name_))
         if not wanted:
             say("The clipboard has no text to look for.")
             return
         folder = next((f for f, _ in wanted if f), None)
+        prefix = ("No path on the clipboard; looked in this folder. "
+                  if follow and folder is None else "")
         if folder is not None:
             if not os.path.isdir(folder):
                 say(f"No such folder: {folder}")
@@ -1840,7 +1847,7 @@ class FilesystemPane(ttk.Frame):
             notes.append(f"Here but not listed (not a Commodore file): {', '.join(hidden)}.")
         if missing:
             notes.append(f"Not found: {', '.join(missing)}.")
-        say(" ".join([f"Selected {len(found)}." if found else "Nothing selected."] + notes))
+        say(prefix + " ".join([f"Selected {len(found)}." if found else "Nothing selected."] + notes))
 
     def copy_selected(self, full):
         """⌘C: the selected names; ⇧⌘C (full=True): their full paths. Folders too, not "..";

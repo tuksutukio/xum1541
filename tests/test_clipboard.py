@@ -29,10 +29,10 @@ class Clipboard(BusyApp):
         pane.copy_selected(full=False)
         self.assertIn("Nothing selected", self.app._sv.get())
 
-    def paste(self, pane, text):
+    def paste(self, pane, text, follow=True):
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        pane.paste_locate()
+        pane.paste_locate(follow=follow)
         return [pane._entries[i][0] for i in pane.lb.curselection()]
 
     def test_paste_finds_and_selects(self):
@@ -47,15 +47,27 @@ class Clipboard(BusyApp):
         # A full path opens its folder and selects the file.
         self.assertEqual(self.paste(pane, os.path.join(sub, "Game.d64")), ["Game.d64"])
         self.assertEqual(pane._path, sub)
-        # Bare names, several lines, case ignored when there's no exact match.
-        self.assertEqual(self.paste(pane, "game.d64\nother.prg\n"), ["Game.d64", "other.prg"])
+        # ⌘V: bare names, several lines, case ignored when there's no exact match.
+        self.assertEqual(self.paste(pane, "game.d64\nother.prg\n", follow=False),
+                         ["Game.d64", "other.prg"])
+        # ⌘V never changes folder: a full path counts by its last part, here.
+        pane._path = top
+        pane._load()
+        self.assertEqual(self.paste(pane, os.path.join(sub, "Game.d64"), follow=False), [])
+        self.assertEqual(pane._path, top)
+        self.assertEqual(self.paste(pane, os.path.join("/elsewhere", "disks"), follow=False), ["disks"])
+        # ⇧⌘V with no path: says so, looks here.
+        self.paste(pane, "disks", follow=True)
+        self.assertIn("No path on the clipboard", self.app._sv.get())
+        pane._path = sub
+        pane._load()
         # A folder by full path is selected in its parent.
         self.assertEqual(self.paste(pane, sub + "/"), ["disks"])
         self.assertEqual(pane._path, top)
         # Missing, and present but not listed.
         pane._path = sub
         pane._load()
-        self.assertEqual(self.paste(pane, "nothere.prg\nreadme.txt"), [])
+        self.assertEqual(self.paste(pane, "nothere.prg\nreadme.txt", follow=False), [])
         self.assertIn("Not found: nothere.prg.", self.app._sv.get())
         self.assertIn("not a Commodore file): readme.txt.", self.app._sv.get())
         # No such folder: the pane stays where it is.
