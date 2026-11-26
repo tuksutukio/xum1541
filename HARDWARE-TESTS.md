@@ -14,6 +14,8 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
   makes `d64copy` ~75 % slower (opencbm-tools.md) and may cause stalls; Diskmasher advises users the same way.
   Pinning down the bottleneck (xum1541 firmware, opencbm's macOS port, `auto` transfer choice) isn't ours to fix;
   report it upstream some day.
+- **Give Antti feedback while tests run:** say what a run will do and in what order before starting it (he only hears
+  the drive), and suggest `tail -f ~/Library/Logs/diskmasher.log` in another tab for a live view of every command.
 - **Before any test that writes, list the disk on its own** and confirm it's the agreed test disk.
 - **Worn, reused disks first** (what users have); a mint disk as the reference when a result might be the disk.
 - **Default test disk image:** `/Users/tuksu/tmp/diskname_backup.d64` (Antti, 2026-11-26): DISKNAME, ID 01, 13 files
