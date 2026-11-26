@@ -2,6 +2,7 @@
 fake drive with a little DOS (fake_opencbm.py: dir, cbmwrite and scratch on the image)."""
 import glob
 import os
+import unittest
 
 from _common import FakeTools, _bytes, d, make_d64
 from test_busy import BusyApp
@@ -36,11 +37,13 @@ def file_data(img, name):
         t, s = blk[0], blk[1]
 
 
-class Arrange(FakeTools, BusyApp):
+class ArrangeApp(FakeTools, BusyApp):
+    """The app pieces and the fake drive with a little DOS (no tests of its own)."""
+
     def setUp(self):
         FakeTools.setUp(self)
         BusyApp.setUp(self)
-        for name in ("_arrange_disk", "_cancel_and_recover", "_reset_and_check"):
+        for name in ("_arrange_disk", "_run_rebuild", "_cancel_and_recover", "_reset_and_check"):
             setattr(self.app, name, getattr(d.DiskMasher, name).__get__(self.app))
         # Keep the task dialog's closures (and their Tk variables) alive until tearDown:
         # dropped last in the worker thread, they'd be freed there, which Tcl doesn't allow
@@ -92,6 +95,8 @@ class Arrange(FakeTools, BusyApp):
         self.app._arrange_disk(*args)
         self.pump(lambda: self.app._ops == 0, timeout=20)
 
+
+class Arrange(ArrangeApp):
     def test_sort(self):
         listing = self.disk([f("ZED", 1), f("NOTES", 2, type=0x81), f("ALPHA", 3)])
         self.run_it("Sort", listing, True, [], None)
@@ -190,6 +195,68 @@ class Arrange(FakeTools, BusyApp):
         self.assertEqual(len(self.errors), 1)
         self.assertIn("26, WRITE PROTECT ON", self.errors[0][1])
         self.assertEqual(_bytes(self.image), self.original)
+
+
+@unittest.skipIf(d._C1541 is None, "VICE's c1541 not found")
+class Rebuild(ArrangeApp):
+    """Disk → Rebuild (DiskMasher._run_rebuild) against the fake drive's little DOS."""
+
+    def scattered(self):
+        big = bytes(range(256)) * 3
+        return self.disk([dict(name="ZED", sectors=[(30, 5), (3, 1), (17, 9), (3, 11)], data=big),
+                          dict(name="ALPHA", sectors=[(1, 0)], data=b"\x01\x08hi")])
+
+    def go(self, listing, keep=False, fmt=False):
+        self.dest = os.path.join(self.state, "orig.d64")
+        self.app._run_rebuild(listing, self.dest, keep, fmt)
+        self.pump(lambda: self.app._ops == 0, timeout=30)
+
+    def test_rebuild(self):
+        listing = self.scattered()
+        self.go(listing, keep=True)
+        self.assertEqual(self.errors, [])
+        self.assertIn("read back identical", self.app._sv.get())
+        new = _bytes(self.image)
+        self.assertNotEqual(new, self.original)
+        old_files = [(e[2], e[5:21], d.image_file_data(self.original, e[3], e[4]))
+                     for _, e in d._listed_entries(self.original)]
+        self.assertEqual([(e[2], e[5:21], d.image_file_data(new, e[3], e[4]))
+                          for _, e in d._listed_entries(new)], old_files)
+        self.assertEqual(_bytes(self.dest), self.original)          # the original image, kept
+        steps = [x.split(" · ")[1] for x in dict.fromkeys(self.details)]
+        self.assertEqual(steps, ["Checking the disk", "Reading the whole disk",
+                                 "Building the new image", "Writing the new image",
+                                 "Reading it back to compare"])
+        self.assertFalse(any(c.startswith("cbmforng") for c in self.calls()))
+
+    def test_format_first(self):
+        listing = self.scattered()
+        self.go(listing, fmt=True)
+        self.assertEqual(self.errors, [])
+        calls = self.calls()
+        fmt = next(i for i, c in enumerate(calls) if c.startswith("cbmforng"))
+        self.assertEqual(calls[fmt], "cbmforng -r 2 8 WORK,01")
+        write = next(i for i, c in enumerate(calls) if c.startswith("d64copy") and c.endswith(" 8"))
+        self.assertLess(fmt, write)
+        self.assertFalse(os.path.exists(self.dest))                 # keep was off
+
+    def test_refused_disk_is_untouched(self):
+        listing = self.disk([f("A", 1), dict(name="----", sectors=[(2, 0)], type=0x80)])
+        self.go(listing)
+        self.assertEqual(len(self.errors), 1)
+        self.assertIn("Can't rebuild", self.errors[0][1])
+        self.assertIn("not changed", self.errors[0][1])
+        self.assertEqual(_bytes(self.image), self.original)
+        self.assertFalse(os.path.exists(self.dest))
+
+    def test_failed_write_keeps_the_original_image(self):
+        listing = self.scattered()
+        self.scenario(disk=self.image, dos=True, write_protected=True)
+        self.go(listing)                                            # keep off
+        self.assertEqual(len(self.errors), 1)
+        self.assertIn("26,WRITE PROTECT ON", self.errors[0][1])
+        self.assertIn("Write image", self.errors[0][1])
+        self.assertEqual(_bytes(self.dest), self.original)
 
 
 if __name__ == "__main__":

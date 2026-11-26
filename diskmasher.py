@@ -11,6 +11,7 @@ import math
 import os
 import pty
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -404,6 +405,145 @@ def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_ev
         return None
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     return lines[-1] if lines else f"d64copy exit code {rc}"
+
+
+def write_image_to_disk(path, on_progress=None, proc_store=None, cancel_event=None):
+    """Write a 35-track .d64 to the disk in DRIVE with d64copy, with progress like
+    read_disk_to_file. Returns None when all 683 blocks were written, else an error string
+    (d64copy exits 0 even after a [Fatal], so its output decides)."""
+    out = []
+
+    def _text(t):
+        out.append(t)
+        if on_progress:
+            m = None
+            for m in _D64COPY_PROGRESS.finditer(t):
+                pass
+            if m:
+                on_progress(int(m.group(1)), int(m.group(3)) / max(1, int(m.group(4))))
+    reset_and_settle()
+    if cancel_event is not None and cancel_event.is_set():
+        return "cancelled"
+    try:
+        rc = stream_cmd(["d64copy", path, DRIVE], _text, proc_store)
+    except OSError as e:
+        return str(e)
+    after_d64copy(cancel_event)
+    text = "".join(out)
+    copied, expected = blocks_copied(text, 35)
+    if rc == 0 and "[Fatal]" not in text and copied == expected:
+        return None
+    if copied is not None and copied != expected:
+        return f"only {copied} of {expected} blocks were written"
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return lines[-1] if lines else f"d64copy exit code {rc}"
+
+
+def format_disk(name, disk_id, proc_store=None, cancel_event=None):
+    """cbmforng (35 tracks) with this name and ID, as Write image's pre-format does.
+    Returns None or an error string."""
+    reset_and_settle()
+    if cancel_event is not None and cancel_event.is_set():
+        return "cancelled"
+    out = []
+    try:
+        rc = stream_cmd(["cbmforng", "-r", "2", DRIVE, f"{name},{disk_id}"], out.append, proc_store)
+    except OSError as e:
+        return str(e)
+    text = "".join(out)
+    if rc == 0 and "[Fatal]" not in text:
+        return None
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return lines[-1] if lines else f"cbmforng exit code {rc}"
+
+
+def image_file_data(img, t, s):
+    """The bytes of the file whose chain starts at t/s in a .d64 image (254 per sector,
+    the last sector up to its link's byte count). Raises ValueError on a broken chain."""
+    out, seen = bytearray(), set()
+    while True:
+        if not (1 <= t <= 40 and 0 <= s < SECTORS_PER_TRACK[t - 1]) or (t, s) in seen:
+            raise ValueError(f"broken chain at {t}/{s}")
+        seen.add((t, s))
+        o = _blk(t, s) * 256
+        blk = img[o:o + 256]
+        if blk[0] == 0:
+            return bytes(out + blk[2:blk[1] + 1])
+        out += blk[2:]
+        t, s = blk[0], blk[1]
+
+
+def _listed_entries(img):
+    """[(offset, 32-byte entry)] of a .d64's listed directory entries, in directory order."""
+    out, t, s, seen = [], 18, 1, set()
+    while t and (t, s) not in seen and len(seen) < 18:
+        seen.add((t, s))
+        o = _blk(t, s) * 256
+        for k in range(8):
+            if img[o + 32 * k + 2]:
+                out.append((o + 32 * k, bytes(img[o + 32 * k:o + 32 * k + 32])))
+        t, s = img[o], img[o + 1]
+    return out
+
+
+def rebuild_image(src, out_path):
+    """Build a fresh 35-track .d64 at out_path holding the same files as the image `src`
+    (bytes), in the same directory order, written one after the other by VICE's c1541,
+    so each file is in one piece. Names, type bytes (locked flags too) and the disk name
+    and ID are copied byte for byte afterwards, so graphics characters survive c1541's
+    ASCII-to-PETSCII name conversion. Every file's data is compared with the original
+    before returning. Returns None or the reason it can't be done (nothing is written to
+    out_path then)."""
+    if _C1541 is None:
+        return "VICE's c1541 wasn't found"
+    try:
+        info = analyze_image(src)
+    except ValueError as e:
+        return str(e)
+    if info["tracks"] != 35:
+        return "this is a 40-track disk; Rebuild only handles 35-track disks so far"
+    if info["problems"]:
+        return "it can't be copied cleanly:\n• " + "\n• ".join(info["problems"])
+    entries = _listed_entries(src)
+    if not entries:
+        return "the disk has no files"
+    with tempfile.TemporaryDirectory() as tmp:
+        build = os.path.join(tmp, "rebuild.d64")
+        cmd = [_C1541, "-format", "rebuild,00", "d64", build, "-attach", build]
+        data = []
+        for i, (_, e) in enumerate(entries):
+            try:
+                data.append(image_file_data(src, e[3], e[4]))
+            except ValueError as err:
+                return f'"{e[5:21].rstrip(bytes([0xA0])).decode("latin-1")}": {err}'
+            f = os.path.join(tmp, f"{i:03d}.bin")
+            with open(f, "wb") as fh:
+                fh.write(data[-1])
+            cmd += ["-write", f, f"f{i:03d}"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, **_C1541_ENV},
+                               timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as err:
+            return f"c1541 failed: {err}"
+        if r.returncode != 0 or not os.path.exists(build):
+            return f"c1541 failed: {(r.stderr or r.stdout).strip()[-200:]}"
+        new = bytearray(_read_bytes(build))
+        if len(new) != 174848:
+            return f"c1541 made an image of {len(new)} bytes"
+        bam = _blk(18, 0) * 256
+        new[bam + 0x90:bam + 0xAB] = src[bam + 0x90:bam + 0xAB]      # name, ID, DOS type
+        built = _listed_entries(new)
+        if len(built) != len(entries):
+            return f"c1541 wrote {len(built)} of {len(entries)} files"
+        for (o, _), (_, e) in zip(built, entries):
+            new[o + 2] = e[2]                                       # type byte, flags
+            new[o + 5:o + 21] = e[5:21]                             # the name, raw
+        for (_, b), (_, e), d in zip(_listed_entries(new), entries, data):
+            if b[2] != e[2] or b[5:21] != e[5:21] or image_file_data(new, b[3], b[4]) != d:
+                return "the rebuilt image doesn't match the original (checked before writing)"
+        with open(out_path, "wb") as fh:
+            fh.write(new)
+    return None
 
 
 def probe_disk(proc_store=None, cancel_event=None, track18=True):
@@ -1667,6 +1807,7 @@ class CbmDirPane(ttk.Frame):
         disk_menu.add_command(label="Format…",  command=lambda: self.event_generate("<<FormatRequest>>"))
         disk_menu.add_command(label="FB-ify…",  command=lambda: self.event_generate("<<FBifyRequest>>"))
         disk_menu.add_command(label="Sort…",    command=lambda: self.event_generate("<<SortRequest>>"))
+        disk_menu.add_command(label="Rebuild…", command=lambda: self.event_generate("<<RebuildRequest>>"))
         disk_menu.add_separator()
         disk_menu.add_command(label="Erase…",   command=lambda: self.event_generate("<<EraseRequest>>"))
         disk_btn["menu"] = disk_menu
@@ -1905,6 +2046,7 @@ class DiskMasher(tk.Tk):
         self.cbm_pane.bind("<<FormatRequest>>", self._when_free(self._format_disk))
         self.cbm_pane.bind("<<FBifyRequest>>",    self._when_free(self._fbify_disk))
         self.cbm_pane.bind("<<SortRequest>>",     self._when_free(self._sort_disk))
+        self.cbm_pane.bind("<<RebuildRequest>>",  self._when_free(self._rebuild_disk))
         self.cbm_pane.bind("<<EraseRequest>>",    self._when_free(self._erase_disk))
         self.cbm_pane.bind("<<ReadImageRequest>>",   self._when_free(self._read_image_from_cbm))
         self.cbm_pane.bind("<<ReadToImageRequest>>", self._when_free(self._read_to_image))
@@ -3610,6 +3752,234 @@ class DiskMasher(tk.Tk):
             self._arrange_disk("Sort", entries, True, fb_files, image)
 
         dlg.wait_window()
+
+    def _rebuild_disk(self):
+        """Disk → Rebuild…: read the disk, build a fresh image with the same files in the
+        same order (rebuild_image), optionally format, write it back, read it back."""
+        if not self.cbm_pane._entries:
+            self._set_status("Refreshing…")
+            def _refresh():
+                raw = cbm_dir(DRIVE)
+                self.after(0, lambda: self.cbm_pane._apply_dir(raw))
+                self.after(0, lambda: self._rebuild_disk() if self.cbm_pane._entries else
+                           self._set_status("Nothing to rebuild: the disk has no files."))
+            self._start_op('Refreshing', _refresh)
+            return
+        entries = self.cbm_pane._entries[:]
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Rebuild disk")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        _take_focus(dlg)
+
+        about = ttk.LabelFrame(dlg, text="What it does", padding=(8, 6))
+        about.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        ttk.Label(about, justify="left", wraplength=420, text=(
+            "Reads the whole disk, builds a fresh copy of it on the Mac with the same files "
+            "in the same order, each in one piece, and writes that back to every sector. "
+            "Then it reads the disk again and compares. About 5 minutes.\n\n"
+            "Disks with read errors in files, REL, GEOS or DEL entries, 40 tracks or two "
+            "sides are refused before anything is written.")).pack(anchor="w")
+
+        fmt_frame = ttk.LabelFrame(dlg, text="Format", padding=(8, 4))
+        fmt_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+        fmt_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(fmt_frame, text="Format the disk first (same name and ID)",
+                        variable=fmt_var).pack(anchor="w")
+        ttk.Label(fmt_frame, foreground="gray", justify="left", wraplength=420, text=(
+            "Writing an image rewrites each sector's data; only a format rewrites the "
+            "sector headers too.")).pack(anchor="w")
+
+        hdr      = self.cbm_pane._hdr.get()
+        m        = re.search(r'"(.+?)"', hdr)
+        diskname = re.sub(r'[^a-zA-Z0-9_-]', '_', self.cbm_pane.disk_name.strip()
+                          or (m.group(1).strip() if m else "disk")).lower()
+        dest_dir = self.fs_pane.current_dir()
+        default  = os.path.join(dest_dir, f"{diskname}_original.d64")
+        n = 2
+        while os.path.exists(default):
+            default = os.path.join(dest_dir, f"{diskname}_original-{n}.d64")
+            n += 1
+        img_frame = ttk.LabelFrame(dlg, text="Image of the original disk", padding=(8, 4))
+        img_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+        keep_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(img_frame, text="Keep it afterwards (always kept if writing fails)",
+                        variable=keep_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(img_frame, text="Path:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        path_var = tk.StringVar(value=default)
+        ttk.Entry(img_frame, textvariable=path_var, width=40).grid(row=1, column=1, sticky="ew")
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.grid(row=3, column=0, pady=(4, 10))
+
+        def _go():
+            path = path_var.get().strip() or default
+            keep, do_fmt = keep_var.get(), fmt_var.get()
+            if os.path.exists(path):
+                messagebox.showerror("Rebuild disk", f"{os.path.basename(path)} already exists.",
+                                     parent=dlg)
+                return
+            dlg.destroy()
+            self._run_rebuild(entries, path, keep, do_fmt)
+
+        ttk.Button(btn_frame, text="Rebuild", command=_go).pack(side="left", padx=8)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
+        dlg.wait_window()
+
+    def _run_rebuild(self, listing, image_path, keep, do_fmt):
+        """The worker of Disk → Rebuild. Steps: check, read, build (nothing on the disk has
+        changed until here), [format], write, read back and compare. Once the disk is
+        touched, a failure keeps the original image whatever `keep` says."""
+        set_msg, close, cancel_event, proc_store = self._make_task_dialog("Rebuild disk",
+                                                                          "Starting…")
+        self._set_status("Rebuilding the disk…")
+        steps = ["check", "read", "build"] + (["format"] if do_fmt else []) + ["write", "verify"]
+        words = {"check": "Checking the disk", "read": "Reading the whole disk",
+                 "build": "Building the new image", "format": "Formatting",
+                 "write": "Writing the new image", "verify": "Reading it back to compare"}
+
+        def step(what, msg="Starting…"):
+            set_msg(msg, detail=f"Step {steps.index(what) + 1} of {len(steps)} · {words[what]}")
+
+        def run():
+            o = {"error": None, "touched": False, "image": None, "msg": None}
+            tmp = tempfile.mkdtemp(prefix="diskmasher-rebuild-")
+            original = os.path.join(tmp, "original.d64")
+
+            def done():
+                close()
+                if cancel_event.is_set() and not o["touched"]:
+                    return              # _cancel_and_recover reports and refreshes
+                saved = f"\n\nImage of the original disk: {o['image']}" if o["image"] else ""
+                if o["error"] or cancel_event.is_set():
+                    err = o["error"] or "Cancelled."
+                    state = ("The disk was not changed." if not o["touched"] else
+                             "The disk was changed and may be incomplete: write the image of "
+                             "the original back with Write image.")
+                    messagebox.showerror("Rebuild not done", f"{err}\n\n{state}{saved}")
+                    self._set_status("Rebuild not done.")
+                else:
+                    self._set_status(o["msg"] + (f" Original image: {o['image']}" if o["image"] else ""))
+                if o["image"]:
+                    self.fs_pane._load()
+                if not cancel_event.is_set():
+                    self.cbm_pane.refresh()
+
+            try:
+                step("check", "Reading tracks 18 and 36…")
+                pr = probe_disk(proc_store, cancel_event)
+                if cancel_event.is_set():
+                    return
+                if pr["error"]:
+                    o["error"] = f"Could not check the disk: {pr['error']}."
+                    return
+                if pr["double_sided"]:
+                    o["error"] = "This is a double-sided (1571) disk; Rebuild handles one side only."
+                    return
+                if pr["t36_readable"] or pr["t36_partial"]:
+                    o["error"] = "This disk has tracks beyond 35; Rebuild handles 35-track disks only."
+                    return
+
+                step("read")
+                stats = {}
+                err = read_disk_to_file(
+                    original, 35,
+                    lambda t, fr: set_msg(f"Track {t} of 35", fraction=fr,
+                                          detail=f"Step 2 of {len(steps)} · {words['read']}"),
+                    proc_store, cancel_event, stats)
+                if cancel_event.is_set():
+                    return
+                if err or stats.get("copied") != stats.get("expected"):
+                    o["error"] = (f"Reading the disk failed ({err})." if err else
+                                  f"{stats['expected'] - stats['copied']} blocks couldn't be read.")
+                    return
+                o["read_ok"] = True
+                src = _read_bytes(original)
+                names = [x["name"].upper() for x in analyze_image(src)["files"]]
+                if len(names) != len(listing) or any(
+                        a != b.upper() for a, (_, b, _) in zip(names, listing)
+                        if a.isascii() and b.isascii()):
+                    o["error"] = ("The disk doesn't match the directory shown (was it swapped?). "
+                                  "Refresh and try again.")
+                    return
+
+                step("build", "Copying the files into a fresh image…")
+                built = os.path.join(tmp, "rebuilt.d64")
+                err = rebuild_image(src, built)
+                if err:
+                    o["error"] = f"Can't rebuild this disk: {err}"
+                    return
+                if cancel_event.is_set():
+                    return
+
+                if do_fmt:
+                    step("format", "Formatting…")
+                    name, disk_id = image_format_header(src)
+                    o["touched"] = True
+                    err = format_disk(name, disk_id, proc_store, cancel_event)
+                    if cancel_event.is_set():
+                        return
+                    if err:
+                        o["error"] = f"Formatting failed: {err}"
+                        return
+
+                step("write")
+                o["touched"] = True
+                err = write_image_to_disk(
+                    built,
+                    lambda t, fr: set_msg(f"Track {t} of 35", fraction=fr,
+                                          detail=f"Step {steps.index('write') + 1} of {len(steps)}"
+                                                 f" · {words['write']}"),
+                    proc_store, cancel_event)
+                if cancel_event.is_set():
+                    return
+                if err:
+                    o["error"] = f"Writing the new image failed: {err}"
+                    return
+
+                step("verify")
+                back = os.path.join(tmp, "readback.d64")
+                stats = {}
+                err = read_disk_to_file(
+                    back, 35,
+                    lambda t, fr: set_msg(f"Track {t} of 35", fraction=fr,
+                                          detail=f"Step {len(steps)} of {len(steps)} · {words['verify']}"),
+                    proc_store, cancel_event, stats)
+                if cancel_event.is_set():
+                    return
+                if err or stats.get("copied") != stats.get("expected"):
+                    o["error"] = ("Reading the rebuilt disk back failed "
+                                  f"({err or str(stats['expected'] - stats['copied']) + ' blocks unreadable'}).")
+                    return
+                got, want = _read_bytes(back)[:174848], _read_bytes(built)
+                if got != want:
+                    bad = [f"{t}/{s}" for t in range(1, 36) for s in range(SECTORS_PER_TRACK[t - 1])
+                           if got[_blk(t, s) * 256:_blk(t, s) * 256 + 256]
+                           != want[_blk(t, s) * 256:_blk(t, s) * 256 + 256]]
+                    o["error"] = (f"The disk doesn't read back as written: {len(bad)} sector(s) "
+                                  f"differ ({', '.join(bad[:8])}{'…' if len(bad) > 8 else ''}).")
+                    return
+                o["msg"] = "Rebuild done: every sector written and read back identical."
+            except Exception as e:
+                o["error"] = f"Unexpected error: {e}"
+            finally:
+                failed = o["error"] or cancel_event.is_set()
+                # Only a complete read is worth keeping (d64copy creates the file at
+                # full size before it reads anything).
+                if o.get("read_ok") and (keep or (failed and o["touched"])):
+                    try:
+                        shutil.move(original, image_path)
+                        o["image"] = image_path
+                    except OSError as e:
+                        o["error"] = (o["error"] or "") + f"\n\nCould not save the image: {e} (kept in {tmp})"
+                        tmp = None
+                if tmp:
+                    shutil.rmtree(tmp, ignore_errors=True)
+                self.after(0, done)
+
+        self._start_op("Rebuild", run, local=True)
 
     def _fbify_disk(self):
         if not self.cbm_pane._entries and self.cbm_pane.blocks_free() is None:

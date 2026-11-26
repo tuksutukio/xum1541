@@ -218,9 +218,31 @@ def cbmctrl(args, sc):
 
 def d64copy(args, sc):
     """Answers per start track (-s N), or "full" without -s. The entry names an image file
-    to copy to the destination (the last argument), the output text and the exit code."""
+    to copy to the destination (the last argument), the output text and the exit code.
+    With scenario["dos"] and no entry, it works on scenario["disk"] (a 35-track disk):
+    writing an image (`d64copy <image> <unit>`) copies it onto the disk, a full read copies
+    the disk out, track 18 reads from it, and track 36 isn't there."""
     start = args[args.index("-s") + 1] if "-s" in args else "full"
-    entry = sc.get("d64copy", {}).get(start, {})
+    entry = sc.get("d64copy", {}).get(start)
+    if entry is None and sc.get("dos"):
+        if args[-1].isdigit():                       # write: d64copy <image> <unit>
+            with open(args[-2], "rb") as f:
+                data = f.read()[:174848]
+            if sc.get("write_protected"):
+                print("[Fatal] 26,WRITE PROTECT ON,18,00")
+                return 0
+            with open(sc["disk"], "r+b") as g:
+                g.write(data)
+            print("683 blocks copied.")
+            return 0
+        if start == "36":
+            print("[Fatal] 21,READ ERROR,36,00\n0 blocks copied.")
+            return 0
+        with open(sc["disk"], "rb") as f, open(args[-1], "wb") as g:
+            g.write(f.read())
+        print("19 blocks copied." if start == "18" else "683 blocks copied.")
+        return 0
+    entry = entry or {}
     if entry.get("image"):
         with open(entry["image"], "rb") as f, open(args[-1], "wb") as g:
             g.write(f.read())
@@ -254,6 +276,14 @@ def cbmwrite(args, sc):
     return entry.get("rc", 0)
 
 
+def cbmforng(args, sc):
+    """Formats nothing (the image write that follows rewrites every sector anyway); its
+    answer can be set with scenario["cbmforng"] = {"out", "rc"}."""
+    entry = sc.get("cbmforng", {})
+    print(entry.get("out", ""))
+    return entry.get("rc", 0)
+
+
 def main():
     tool, args = sys.argv[1], sys.argv[2:]
     _log("calls.log", " ".join([tool, *args]))
@@ -262,7 +292,7 @@ def main():
     if hang:
         time.sleep(hang)
     return {"cbmctrl": cbmctrl, "d64copy": d64copy, "cbmread": cbmread,
-            "cbmwrite": cbmwrite}[tool](args, sc)
+            "cbmwrite": cbmwrite, "cbmforng": cbmforng}[tool](args, sc)
 
 
 if __name__ == "__main__":

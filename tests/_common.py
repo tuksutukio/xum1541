@@ -130,7 +130,7 @@ class FakeTools(unittest.TestCase):
         self.bin = os.path.join(self.state, "bin")
         os.mkdir(self.bin)
         fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_opencbm.py")
-        for tool in ("cbmctrl", "cbmread", "cbmwrite", "d64copy"):
+        for tool in ("cbmctrl", "cbmread", "cbmwrite", "d64copy", "cbmforng"):
             p = os.path.join(self.bin, tool)
             with open(p, "w") as f:
                 f.write(f'#!/bin/sh\nexec "{sys.executable}" -B "{fake}" {tool} "$@"\n')
