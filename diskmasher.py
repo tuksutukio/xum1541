@@ -314,11 +314,22 @@ def after_d64copy(cancel_event=None):
         reset_and_settle()
 
 
-def stream_cmd(cmd, on_text, proc_store=None):
+STALL_AFTER = 45        # seconds without any output from a tool: it has stalled
+STALLED = -900          # stream_cmd's return code when it stopped a silent tool
+STALL_COUNT = 0         # stalls seen this session (the app reports them per operation)
+STALL_HOOK = None       # set by the app: called (from a worker thread) with a retry message
+
+
+def stream_cmd(cmd, on_text, proc_store=None, cwd=None, stall_after=None):
     """Run cmd under a pty (opencbm tools buffer their progress output on a pipe) and call
-    on_text(chunk) from this thread as output arrives. Returns the exit code.
+    on_text(chunk) from this thread as output arrives. Returns the exit code, or STALLED
+    when the tool printed nothing for STALL_AFTER seconds and was stopped (_stop_proc:
+    SIGTERM first). Normal gaps are a few seconds; two full d64copy reads stalled outright
+    on 2026-11-26. A slow tool that still prints is left alone.
     Call from a worker thread; proc_store[0] holds the process while it runs."""
     import select as _select
+    global STALL_COUNT
+    stall_after = STALL_AFTER if stall_after is None else stall_after
     started, tail = time.monotonic(), []
     def _on(t):
         tail.append(t)
@@ -327,11 +338,12 @@ def stream_cmd(cmd, on_text, proc_store=None):
     master_fd, slave_fd = pty.openpty()
     try:
         proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd,
-                                stdin=subprocess.DEVNULL, close_fds=True)
+                                stdin=subprocess.DEVNULL, close_fds=True, cwd=cwd)
     finally:
         os.close(slave_fd)
     if proc_store is not None:
         proc_store[0] = proc
+    stalled, last = False, time.monotonic()
     try:
         while True:
             try:
@@ -340,15 +352,24 @@ def stream_cmd(cmd, on_text, proc_store=None):
                     chunk = os.read(master_fd, 4096)
                     if not chunk:
                         break
+                    last = time.monotonic()
                     _on(chunk.decode("utf-8", errors="replace")
                         .replace("\r\n", "\n").replace("\r", "\n"))
                 elif proc.poll() is not None:
                     break
+                elif stall_after and time.monotonic() - last > stall_after:
+                    stalled = True
+                    STALL_COUNT += 1
+                    log_event(f"--- stalled: no output for {stall_after} s from "
+                              f"{' '.join(map(str, cmd))}; stopping it")
+                    _on(f"\nNo progress for {stall_after} s: stopped.\n")
+                    _stop_proc(proc)
+                    break
             except OSError:
                 break
         proc.wait()
-        log_cmd(cmd, started, f"exit {proc.returncode}", "".join(tail))
-        return proc.returncode
+        log_cmd(cmd, started, "STALLED" if stalled else f"exit {proc.returncode}", "".join(tail))
+        return STALLED if stalled else proc.returncode
     finally:
         if proc_store is not None:
             proc_store[0] = None
@@ -356,6 +377,33 @@ def stream_cmd(cmd, on_text, proc_store=None):
             os.close(master_fd)
         except OSError:
             pass
+
+
+def stream_retrying(cmd, on_text, proc_store=None, cancel_event=None, cwd=None,
+                    before_retry=None):
+    """stream_cmd, and once more after a reset if it stalled (not after a Cancel). For
+    commands that are safe to repeat: full reads, image writes, formats, file reads
+    (before_retry deletes a half-read file). Never for cbmwrite (a half-written file on
+    the disk). Every retry is visible (Antti, 2026-11-26): in the tool's output stream
+    (progress windows), through STALL_HOOK (the status bar), and in the log."""
+    rc = stream_cmd(cmd, on_text, proc_store, cwd)
+    if rc != STALLED or (cancel_event is not None and cancel_event.is_set()):
+        return rc
+    msg = (f"{os.path.basename(str(cmd[0]))} made no progress for {STALL_AFTER} s and was "
+           "stopped. Resetting the drive and trying again (attempt 2 of 2)…")
+    log_event(f"--- retry after a stall: {' '.join(map(str, cmd))}")
+    on_text("\n" + msg + "\n")
+    if STALL_HOOK:
+        STALL_HOOK(msg)
+    reset_and_settle()
+    if cancel_event is not None and cancel_event.is_set():
+        return rc
+    if before_retry:
+        before_retry()
+    rc = stream_cmd(cmd, on_text, proc_store, cwd)
+    if rc == STALLED:
+        on_text("\nIt stalled again: giving up.\n")
+    return rc
 
 
 _D64COPY_PROGRESS = re.compile(r'(\d+):\s*\S*\s+(\d+)%\s+(\d+)/(\d+)')
@@ -392,7 +440,7 @@ def read_disk_to_file(path, tracks, on_progress=None, proc_store=None, cancel_ev
     if cancel_event is not None and cancel_event.is_set():
         return "cancelled"      # nothing registered in proc_store yet: don't start d64copy
     try:
-        rc = stream_cmd(cmd, _text, proc_store)
+        rc = stream_retrying(cmd, _text, proc_store, cancel_event)
     except OSError as e:
         return str(e)
     after_d64copy(cancel_event)
@@ -425,7 +473,7 @@ def write_image_to_disk(path, on_progress=None, proc_store=None, cancel_event=No
     if cancel_event is not None and cancel_event.is_set():
         return "cancelled"
     try:
-        rc = stream_cmd(["d64copy", path, DRIVE], _text, proc_store)
+        rc = stream_retrying(["d64copy", path, DRIVE], _text, proc_store, cancel_event)
     except OSError as e:
         return str(e)
     after_d64copy(cancel_event)
@@ -447,7 +495,8 @@ def format_disk(name, disk_id, proc_store=None, cancel_event=None):
         return "cancelled"
     out = []
     try:
-        rc = stream_cmd(["cbmforng", "-r", "2", DRIVE, f"{name},{disk_id}"], out.append, proc_store)
+        rc = stream_retrying(["cbmforng", "-r", "2", DRIVE, f"{name},{disk_id}"], out.append,
+                             proc_store, cancel_event)
     except OSError as e:
         return str(e)
     text = "".join(out)
@@ -1278,37 +1327,37 @@ def cbm_read_file(drive, cbm_name, dest_dir, proc_store=None, ftype=None):
     Pass the listing's ftype: cbmread opens a plain name as PRG, so a SEQ or USR file
     fails with 64 FILE TYPE MISMATCH unless the name carries its type ("name,s"; tested
     2026-11-25, drive 9). The local file then gets .seq/.usr, which cbmwrite reads back
-    as the type."""
-    started = time.monotonic()
+    as the type. A stalled read is stopped and tried once more (stream_retrying), after
+    deleting the half-read local file by its exact name."""
     t = type_char(ftype) if ftype else None
     arg = f"{cbm_name},{t}" if t in ("p", "s", "u") else cbm_name
+    out = []
+
+    def _partial():
+        m = re.search(r'-> (.+?)\s*$', "".join(out), re.M)
+        if m:
+            p = os.path.join(dest_dir, m.group(1))
+            if os.path.isfile(p):
+                os.remove(p)
+        out.clear()
     try:
-        proc = subprocess.Popen(
-            ["cbmread", drive, arg],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, errors="replace", cwd=dest_dir)
-        if proc_store is not None:
-            proc_store[0] = proc
-        try:
-            out, _ = proc.communicate(timeout=300)
-        finally:
-            if proc_store is not None:
-                proc_store[0] = None
-        log_cmd(["cbmread", drive, arg], started, f"exit {proc.returncode}", out)
-        err = _opencbm_error(out)
-        if err:
-            return err
-        if proc.returncode != 0:
-            return out.strip() or f"cbmread returned {proc.returncode}"
-        m = re.search(r'-> (.+?)\s*$', out, re.M)
-        if not m or not os.path.isfile(os.path.join(dest_dir, m.group(1))):
-            return "cbmread reported success but wrote no file"
-        return None
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return "Timeout"
+        rc = stream_retrying(["cbmread", drive, arg], out.append, proc_store, cwd=dest_dir,
+                             before_retry=_partial)
     except Exception as e:
         return str(e)
+    text = "".join(out)
+    if rc == STALLED:
+        _partial()
+        return f"cbmread made no progress for {STALL_AFTER} s, twice, and was stopped"
+    err = _opencbm_error(text)
+    if err:
+        return err
+    if rc != 0:
+        return text.strip() or f"cbmread returned {rc}"
+    m = re.search(r'-> (.+?)\s*$', text, re.M)
+    if not m or not os.path.isfile(os.path.join(dest_dir, m.group(1))):
+        return "cbmread reported success but wrote no file"
+    return None
 
 
 WRITE_TYPES = {".prg": "P", ".seq": "S", ".usr": "U"}
@@ -1322,29 +1371,22 @@ def cbm_write_file(drive, local_path, cbm_name=None, proc_store=None):
     ftype = WRITE_TYPES.get(os.path.splitext(local_path)[1].lower())
     cmd = (["cbmwrite"] + (["-f", ftype] if ftype else []) + (["-o", cbm_name] if cbm_name else [])
            + [drive, local_path])
-    started = time.monotonic()
+    out = []
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace")
-        if proc_store is not None:
-            proc_store[0] = proc
-        try:
-            out, _ = proc.communicate(timeout=300)
-        finally:
-            if proc_store is not None:
-                proc_store[0] = None
-        log_cmd(cmd, started, f"exit {proc.returncode}", out)
-        err = _opencbm_error(out)
-        if err:
-            return err
-        if proc.returncode != 0:
-            return out.strip() or f"cbmwrite returned {proc.returncode}"
-        return None
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return "Timeout"
+        rc = stream_cmd(cmd, out.append, proc_store)       # no retry: see stream_retrying
     except Exception as e:
         return str(e)
+    text = "".join(out)
+    if rc == STALLED:
+        return (f"cbmwrite made no progress for {STALL_AFTER} s and was stopped. The disk may "
+                "now hold a half-written file, listed with * before its type: don't scratch "
+                "it, validate the disk instead")
+    err = _opencbm_error(text)
+    if err:
+        return err
+    if rc != 0:
+        return text.strip() or f"cbmwrite returned {rc}"
+    return None
 
 
 def _fmt_size(n):
@@ -2086,6 +2128,9 @@ class DiskMasher(tk.Tk):
         self._op_label = ""
         self._have_drives = False       # set by detect and Cancel's bus check
         self._multi_drives = False      # the last detect found more than one drive
+        self._stalls_at_start = STALL_COUNT
+        global STALL_HOOK               # a stalled tool's retry shows in the status bar at once
+        STALL_HOOK = lambda msg: self.after(0, lambda: self._set_status(msg))
         self._refresh_pending = False
         self.geometry("1100x660+120+80")
         self.minsize(750, 420)
@@ -2282,6 +2327,7 @@ class DiskMasher(tk.Tk):
         self._ops += 1
         if self._ops == 1:
             self._op_label = label
+            self._stalls_at_start = STALL_COUNT
             self._show_busy(True)
         if local:
             self._local_ops += 1
@@ -2305,6 +2351,12 @@ class DiskMasher(tk.Tk):
         self._ops -= 1
         if self._ops == 0:
             self._show_busy(False)
+            # A stall during the operation is never hidden, even when the retry worked.
+            stalls = STALL_COUNT - getattr(self, "_stalls_at_start", STALL_COUNT)
+            if stalls:
+                self._set_status(self._sv.get().rstrip() + f"  ({stalls} stall"
+                                 f"{'s' if stalls > 1 else ''} during this: the drive stopped "
+                                 "responding and was reset; see the log)")
             if self._refresh_pending:
                 self._refresh_pending = False
                 self.cbm_pane.refresh()
@@ -3284,7 +3336,7 @@ class DiskMasher(tk.Tk):
                     self.after(0, lambda t=t: _append(t))
                 reset_and_settle()
                 try:
-                    rc = 1 if cancel_event.is_set() else stream_cmd(cmd, _text, proc_store)
+                    rc = 1 if cancel_event.is_set() else stream_retrying(cmd, _text, proc_store, cancel_event)
                 except OSError as e:
                     rc = 1
                     out.append(str(e))
@@ -3409,7 +3461,7 @@ class DiskMasher(tk.Tk):
         """Run cmd via pty, streaming output to _append on the Tk thread. Returns exit code.
         Call from a worker thread."""
         try:
-            return stream_cmd(cmd, lambda t: self.after(0, lambda t=t: _append(t)), proc_store)
+            return stream_retrying(cmd, lambda t: self.after(0, lambda t=t: _append(t)), proc_store)
         except Exception as e:
             self.after(0, lambda: _append(f"\nError: {e}\n"))
             return 1

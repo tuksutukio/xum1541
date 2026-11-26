@@ -262,6 +262,15 @@ def d64copy(args, sc):
 
 def cbmread(args, sc):
     entry = sc.get("cbmread", {})
+    if sc.get("hang_mid_once", {}).pop("cbmread", None):
+        # Like a read that stalls halfway: it has named and begun the local file.
+        _save_scenario(sc)
+        name = entry.get("creates", "x.prg")
+        with open(name, "wb") as f:
+            f.write(b"\x01")
+        print(f"[Info] reading {args[-1]} -> {name}", flush=True)
+        time.sleep(30)
+        return 1
     if entry.get("creates"):
         with open(entry["creates"], "wb") as f:      # relative to cwd, like the real tool
             f.write(b"\x01\x08")
@@ -314,6 +323,10 @@ def main():
     _log("calls.log", " ".join([tool, *args]))
     sc = _scenario()
     hang = sc.get("hang", {}).get(tool)
+    once = sc.get("hang_once", {}).pop(tool, None)      # silent this one time only
+    if once:
+        _save_scenario(sc)
+        hang = once
     if hang:
         time.sleep(hang)
     return {"cbmctrl": cbmctrl, "d64copy": d64copy, "cbmread": cbmread,

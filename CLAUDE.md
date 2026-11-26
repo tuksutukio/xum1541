@@ -58,6 +58,12 @@ to disk (`FB_PATHS` maps platform → files).
   drive menu updated + refresh (which recovers a 74 head via `cbm_dir`); no answer → replug USB; no drive → power/cable.
 - **After a cancel the bus belongs to `_cancel_and_recover`** until it finishes; it refreshes the right pane itself.
   Workers must check `cancel_event` and skip any further `cbmctrl`/`cbm_dir` call, including the final refresh.
+- **Stall watchdog (2026-11-26):** `stream_cmd` stops a tool that prints nothing for `STALL_AFTER` (45 s) and
+  returns `STALLED`; `stream_retrying` resets and runs it once more, for repeatable commands (full reads, image
+  writes, formats, file reads, which first delete the half-read file). Never `cbmwrite`: a stalled write leaves a
+  half-written file, so it stops with that message. Every stall is visible: in the tool's output (progress
+  windows), via `STALL_HOOK` in the status bar, in the log, and appended to the operation's final status by
+  `_end_op`. A crawl that still prints isn't a stall. Tested in `tests/test_stall.py`.
 - **Never `subprocess.run(timeout=…)` for opencbm tools:** on timeout it SIGKILLs. Use `_run_bounded` (short
   commands) or `_stop_proc` (SIGTERM, 3 s grace, SIGKILL only if still alive).
 - **`reset_and_settle()` before every `d64copy`, and `after_d64copy()` after it** (a `d64copy` right after

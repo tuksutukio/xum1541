@@ -169,8 +169,8 @@ class FullRead(FakeTools):
         ev = threading.Event()
         orig = d.stream_cmd
 
-        def cancelled_during(cmd, on_text, proc_store=None):
-            rc = orig(cmd, on_text, proc_store)
+        def cancelled_during(cmd, on_text, proc_store=None, *args, **kw):
+            rc = orig(cmd, on_text, proc_store, *args, **kw)
             ev.set()                       # Cancel pressed while d64copy ran
             return rc
         d.stream_cmd = cancelled_during

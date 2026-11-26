@@ -306,6 +306,12 @@ The drive says this when it can't find a readable track under its head, or after
 
 ### The drive log
 
+**When a drive stops responding:** if a transfer makes no progress for 45 seconds, Diskmasher stops it, resets
+the drive and tries once more (reads, image writes and formats; a single-file write is not repeated, because it
+may have left a half-written file). This is never hidden: the progress window and the status bar say so as it
+happens, and the final status line mentions it, even when the second try worked. If it happens often with one
+drive, that drive may need attention.
+
 Every command sent to a drive goes into `~/Library/Logs/diskmasher.log`, with how long it took, how it ended and
 its last lines of output. When a drive misbehaves, the log usually shows where.
 
