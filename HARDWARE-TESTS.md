@@ -112,3 +112,7 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
   12 checksum errors on track 1 (where the failing writes had worked); a write onto its own `cbmforng` format
   failed again on track 1 (header not found, banging); after a DOS `N:` format (79 s) a write ran without errors
   but at ~4× slower until stopped at track 20. `cbmforng` had measured 297.3 RPM. Parked (OPEN.md).
+- **2026-11-26/27, 1541 alone on the bus, long run (23:39–00:21):** 30 read-only full reads of a healthy disk in a
+  row, each with a 45 s no-progress watchdog: 30 × OK, 683/683, 82–83 s each, no stall, all 30 images
+  byte-identical (one SHA-1). The first unattended-style run; supports "two drives on the bus" as the cause of the
+  stalls seen earlier (drive 9 alone remains to be run).
