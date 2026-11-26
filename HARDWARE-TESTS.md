@@ -41,7 +41,7 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 | 1571b | 1571 | 9 | power LED went dark during a read (2026-11-26) |
 | 1570 | 1570 (×2) | 8 (hard-wired) | not yet tested |
 | 1541-II | 1541-II (×2) | 8 | not yet tested |
-| VIC-1541 | VIC-1541 | 8 | not yet tested |
+| VIC-1541 | VIC-1541 (black front, no lever) | 8 | detects as "1540 or 1541", `73,CBM DOS V2.6 1541`; ROM: lower chip = `325302-01`, upper = a `901229` revision 2 bytes off VICE's `-05` (`$FEE6` `$00`/`$3E`, `$FFE0` `$E8`/`$AA`; two identical downloads; dump kept locally only) |
 | SD2IEC | several forms | — | not yet tested |
 
 ## Matrix
