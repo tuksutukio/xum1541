@@ -1138,6 +1138,12 @@ def _cbm_dir_once(drive):
     return out
 
 
+# One drive on the bus at a time (Antti, 2026-11-26): with a second device, d64copy reads
+# took ~75 % longer on both a 1541 and a 1571, and both early stalls seen on a 1571 had two
+# drives on the bus (opencbm-tools.md). Advice only: the Drive menu still offers them all.
+MULTI_DRIVE_NOTE = ("  More than one drive is on the bus: transfers are slower and less reliable. "
+                    "Switch off or unplug the drives you're not using.")
+
 NO_ANSWER = "Error: drive {drive} doesn't answer. Is it switched on and connected?"
 NO_DRIVE = ("Error: no drive answers on the bus. Switch one on (or check the cable), "
             "then use Drive → Detect.")
@@ -1933,6 +1939,7 @@ class DiskMasher(tk.Tk):
         self._local_ops = 0             # of those, operations using the left pane's folder
         self._op_label = ""
         self._have_drives = False       # set by detect and Cancel's bus check
+        self._multi_drives = False      # the last detect found more than one drive
         self._refresh_pending = False
         self.geometry("1100x660+120+80")
         self.minsize(750, 420)
@@ -2386,12 +2393,15 @@ class DiskMasher(tk.Tk):
                 else:
                     found = ", ".join(f"{u}: {m}" for u, m in drives)
                     units = [u for u, _ in drives]
+                    self._multi_drives = len(drives) > 1
                     if units and DRIVE not in units and self._select_drive(units[0], refresh=False,
                                                                            by_detect=True):
                         self._set_status(f"Detected {found}. Drive {units[0]} selected "
-                                         f"(no drive answers at the previous one).")
+                                         f"(no drive answers at the previous one)."
+                                         + (MULTI_DRIVE_NOTE if self._multi_drives else ""))
                     else:
-                        self._set_status(f"Detected {found}. Using drive {DRIVE}.")
+                        self._set_status(f"Detected {found}. Using drive {DRIVE}."
+                                         + (MULTI_DRIVE_NOTE if self._multi_drives else ""))
                 if on_done:
                     on_done()
             self.after(0, _done)
@@ -2442,7 +2452,7 @@ class DiskMasher(tk.Tk):
                 close()
                 self.cbm_pane._apply_dir(raw)
                 if not raw.startswith("Error"):     # else _apply_dir said what's wrong
-                    self._set_status("Refreshed.")
+                    self._set_status("Refreshed." + (MULTI_DRIVE_NOTE if self._multi_drives else ""))
             self.after(0, _done)
         self._start_op('Refreshing', _run)
 

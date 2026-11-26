@@ -10,9 +10,10 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 
 ## Strategy (draft, 2026-11-26)
 
-- **One drive on the bus** for anything measured or compared (timings, stalls, drive against drive). A second
-  device makes `d64copy` ~75 % slower (opencbm-tools.md) and may cause stalls. Multi-drive setups are a test case
-  of their own, not the bench.
+- **One drive on the bus, always** (Antti, 2026-11-26: "we should not test on a throttled bus"). A second device
+  makes `d64copy` ~75 % slower (opencbm-tools.md) and may cause stalls; Diskmasher advises users the same way.
+  Pinning down the bottleneck (xum1541 firmware, opencbm's macOS port, `auto` transfer choice) isn't ours to fix;
+  report it upstream some day.
 - **Before any test that writes, list the disk on its own** and confirm it's the agreed test disk.
 - **Worn, reused disks first** (what users have); a mint disk as the reference when a result might be the disk.
 - **Unattended long runs** while Antti is away (his offer): one drive, one test disk, a script that loops read-only
@@ -21,7 +22,7 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 - **Swap one thing at a time** when hunting a fault: the disk between drives, the drive on a unit (DIP switches),
   the devices on the bus. Two of each kind make the comparison.
 - **Update the matrix** after every hardware test, and mark cells stale when the code behind them changes.
-- **Next candidates:** drive 9 alone vs with a second drive over a long run (stalls); Erase and Make first on the
+- **Next candidates:** drive 9 alone over a long run (does it still stall?); Erase and Make first on the
   1541; the VIC-1541 (ROM via a dump compared with VICE's ROM files); the 1570s and 1541-IIs; SD2IEC.
 
 ## Drives
