@@ -108,3 +108,7 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
   plain write after that crawled (622/683 blocks in 10 min, ~6× slower than at 21:42); Claude stopped it, taking
   it for a hang (it was progressing). The drive got worse the longer it worked: suspect heat or a dirty head,
   unproven. Next: cool down, maybe clean the head, then a read-only full read.
+- **2026-11-26, VIC-1541 after reseating a loose IEC cable (22:20–22:43):** a full read ran at normal speed with
+  12 checksum errors on track 1 (where the failing writes had worked); a write onto its own `cbmforng` format
+  failed again on track 1 (header not found, banging); after a DOS `N:` format (79 s) a write ran without errors
+  but at ~4× slower until stopped at track 20. `cbmforng` had measured 297.3 RPM. Parked (OPEN.md).
