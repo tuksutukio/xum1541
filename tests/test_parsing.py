@@ -32,6 +32,8 @@ class Detect(unittest.TestCase):
         self.assertEqual(d.parse_detect(" 8: 1571 \n 9: 1571 \n"), [("8", "1571"), ("9", "1571")])
 
     def test_nothing(self):
+        self.assertEqual(d.parse_detect(" 8: 1540 or 1541 \n 9: 1571\n"),
+                         [("8", "1540 or 1541"), ("9", "1571")])
         self.assertEqual(d.parse_detect(""), [])
         self.assertEqual(d.parse_detect(None), [])
 

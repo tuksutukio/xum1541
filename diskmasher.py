@@ -571,7 +571,7 @@ def erase_tracks(tracks, on_progress=None, proc_store=None, cancel_event=None):
     model = dict(parse_detect(det[1])).get(DRIVE, "") if det and det[0] == 0 else ""
     if not model:
         return False, f"drive {DRIVE} does not answer"
-    if not re.match(r'15(41|70|71)', model):
+    if not re.search(r'\b15(41|70|71)\b', model):
         return False, f"erasing is only implemented for 1541/1570/1571 drives, not {model}"
     if model.startswith(("1570", "1571")):
         _run_bounded(["cbmctrl", "command", DRIVE, "U0>M0"], 10)
@@ -689,7 +689,7 @@ def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_eve
         return False, "cancelled", None
     det = _run_bounded(["cbmctrl", "detect"], 10)
     model = dict(parse_detect(det[1])).get(DRIVE, "") if det and det[0] == 0 else ""
-    if not re.match(r'15(41|70|71)', model):
+    if not re.search(r'\b15(41|70|71)\b', model):
         return False, (f"drive {DRIVE} does not answer" if not model else
                        f"only implemented for 1541/1570/1571 drives, not {model}"), None
     if model.startswith(("1570", "1571")):
@@ -878,8 +878,11 @@ def _run_bounded(cmd, timeout, proc_store=None):
 
 
 def parse_detect(text):
-    """[(unit, model)] from `cbmctrl detect` output, e.g. ' 8: 1571' → [("8", "1571")]."""
-    return re.findall(r'^\s*(\d+):\s*(\S+)', text or "", re.M)
+    """[(unit, model)] from `cbmctrl detect` output, e.g. ' 8: 1571' → [("8", "1571")].
+    The model is the whole rest of the line: opencbm can't tell a 1541 from a 1540 by its
+    ROM and says "1540 or 1541" (seen 2026-11-26 on a light beige 1541)."""
+    return [(u, m.strip()) for u, m in
+            re.findall(r'^[ \t]*(\d+):[ \t]*(\S[^\n]*)', text or "", re.M)]
 
 
 def cbm_detect():
