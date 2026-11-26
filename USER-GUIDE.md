@@ -212,35 +212,26 @@ alone leaves the old tracks 36–40 in place, and the drive still finds them.
 
 ## Rearranging a disk: Sort and FB-ify
 
-Both rewrite every file on the disk: they read everything off it, scratch all the files and write them back in
-the new order. That is a lot of reading and writing, and every step is a chance for something to go wrong, so both
-work the same careful way (below). **Even so, don't use them on rare originals or on disks you can't replace:**
-copy such a disk to an image first (Read image) and rearrange a copy instead. Commercial originals may also rely on
-their exact layout (copy protection, loaders that read sectors directly), which a rewrite doesn't keep.
+Both change only the **directory**, the list of files on track 18. The order of a listing is just the order of
+the entries there, so neither moves or rewrites any file: a sort takes about 15 seconds. The original directory is
+saved before anything is written (see [Where Diskmasher keeps things](#where-diskmasher-keeps-things)), what was
+written is read back and compared, and Cancel is off during the second or two of writing, so a directory is never
+left half done. Nothing is written if the directory on the disk doesn't match the listing on screen (refresh after
+changing disks).
 
-1. **Check the disk** (a few seconds).
-2. **Read the whole disk to an image** (about a minute) and analyse it.
-3. **Read every file** to the Mac.
-4. Only then **scratch the files and write them back** in the new order.
-
-Anything obviously risky stops the operation in steps 1–3, with the disk unchanged:
-
-- a double-sided disk;
-- files reaching beyond track 35;
-- read errors inside files;
-- REL, GEOS, DEL or unclosed files;
-- a disk swapped since the listing.
-
-The dialog shows each step, real progress and the time left.
-
-**Safety copy:** the whole-disk image from step 2 can be kept ("Keep the image afterwards", with its path). If
-writing fails after the files were scratched, the files read in step 3 are saved to a folder ending in `_rescue`
-next to the image, and the image is kept whatever you chose. Write them back from there.
+**Safety copy:** tick "Save a full disk image first" (with its path) to read the whole disk to an image before
+anything changes (1–2 minutes). The directory backup is enough to undo the rearranging itself; the image is for
+the day the disk fails, so you can write it to another one. If the image can't be read completely, nothing is
+changed.
 
 ### Sort
 
-**Disk → Sort…** orders the files: PRG files alphabetically, then SEQ and USR files in their current order.
-Optionally the File Browser goes first ("Add FB as first file"); choose which machines it's for, as in FB-ify below.
+**Disk → Sort…** orders the files: PRG files A–Z first, then all other types A–Z. A–Z follows the Commodore
+character order, so names starting with a space or a digit come before letters. If the disk has DEL entries, often
+separator lines or directory art, Sort asks first: they'd be sorted with the other non-PRG files.
+
+Optionally the File Browser goes first ("Add FB as first file"); choose which machines it's for, as in FB-ify
+below.
 
 ### FB-ify
 
@@ -256,6 +247,9 @@ choose which machine (or machines) the disk is for:
 
 Room on the disk: 9–10 blocks for one machine, 41 for VIC-20, 69 for All. The extra files show up in the directory
 right after `FB`. The C64DTV version isn't offered.
+
+FB is the one thing these write as a file. An FB already on the disk is replaced. The other files keep their order
+behind it (Sort sorts them). FB isn't added to a double-sided (1571) disk; Sort without FB works there.
 
 ## Local files and disk images
 
@@ -301,8 +295,8 @@ its last lines of output. When a drive misbehaves, the log usually shows where.
 ## The disk check and 40-track disks
 
 Some disks were formatted for 40 tracks instead of the standard 35. You can't tell by looking, and a 35-track copy
-of such a disk silently loses tracks 36–40. So before reading a disk to an image, and before Sort and FB-ify,
-Diskmasher checks it. It reads track 18 (the directory) and track 36, which takes a few seconds.
+of such a disk silently loses tracks 36–40. So before reading a disk to an image (including Sort's and FB-ify's
+safety copy), Diskmasher checks it. It reads track 18 (the directory) and track 36, which takes a few seconds.
 
 What the check can find:
 
@@ -311,9 +305,8 @@ What the check can find:
 - **Damaged 40-track disk:** only some sectors of track 36 read. This is a 40-track disk that has decayed; reads
   cover 40 tracks so nothing is lost, and Write image without pre-format refuses it.
 - **Couldn't check:** the track-36 read took too long, so it's unknown whether the disk has 40 tracks. Read
-  image suggests ticking 40-track to be safe (on a 35-track disk the extra tracks just read as errors). Sort and
-  FB-ify read 35 tracks; a file reaching beyond them then shows up in the analysis and stops the operation.
-- **Double-sided (1571) disk:** reading and Sort/FB-ify refuse it, since only one side would be read.
+  image suggests ticking 40-track to be safe (on a 35-track disk the extra tracks just read as errors).
+- **Double-sided (1571) disk:** reading refuses it, since only one side would be read, and so does adding FB.
 - **Extended BAM:** a hint that the disk was formatted by a 40-track DOS (SpeedDOS or DolphinDOS style).
 
 ## Where Diskmasher keeps things
@@ -321,15 +314,14 @@ What the check can find:
 - **Settings** (window size, divider position, drive, checkbox defaults):
   `~/.config/diskmasher/prefs.ini`
 - **Drive command log:** `~/Library/Logs/diskmasher.log`; the previous one is `diskmasher.log.1`.
-- **Directory backups from Make first:**
+- **Directory backups from Make first, Sort and FB-ify:**
   `~/Library/Application Support/Diskmasher/directory-backups/`
 - **Safety copies from Sort and FB-ify:** where you chose in the dialog. By default that's the current left-pane
   folder, as `<disk name>_backup.d64`.
-- **Rescued files after a failed Sort or FB-ify:** a `…_rescue` folder next to the safety copy.
 - **"Only one copy running" marker:** `~/.diskmasher.pid`
 
-A directory backup can be written back to the disk if a Make first ever goes wrong; there is no menu item for
-that yet.
+A directory backup can be written back to the disk to undo a Make first, Sort or FB-ify; there is no menu item
+for that yet.
 
 ## Limits
 

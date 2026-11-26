@@ -12,6 +12,12 @@ Jobs complete at once: $E0 (execute) and $90 (write) answer $08 when the scenari
 the disk is write protected, everything else $01, unless scenario["job_results"]
 overrides a code. With scenario["disk"] (a .d64 path), $80 reads that image's sector
 into buffer 2 and $90 writes buffer 2 back into it.
+
+With scenario["dos"] as well, a little of the DOS works on that image: `cbmctrl dir`
+lists it (in cbmctrl's format, names in lower case), `cbmwrite` adds a directory entry
+in the first free slot (data on free sectors from track 19 on; the BAM isn't kept),
+and `cbmctrl command <unit> S0:A,B` scratches those names; the next `status` then
+answers 01, FILES SCRATCHED.
 """
 import json
 import os
@@ -85,6 +91,77 @@ def _sector_job(code, track, sector, m, disk):
             f.write(bytes(m[0x0500:0x0600]))
 
 
+def _dos_dir_sectors(img):
+    """[(offset of the sector in the image)] along the directory chain from 18/1."""
+    out, t, sec = [], 18, 1
+    while t:
+        off = (sum(_SPT[:t - 1]) + sec) * 256
+        out.append(off)
+        t, sec = img[off], img[off + 1]
+    return out
+
+
+def _dos_slots(img):
+    return [off + 32 * k for off in _dos_dir_sectors(img) for k in range(8)]
+
+
+def _dos_listing(img):
+    bam = (sum(_SPT[:17])) * 256
+    name = img[bam + 0x90:bam + 0xA0].decode("latin-1").replace("\xa0", " ").lower()
+    lines = [f'0 ."{name}" {img[bam + 0xA2:bam + 0xA4].decode("latin-1").lower()} 2a']
+    kinds = {0: "del", 1: "seq", 2: "prg", 3: "usr", 4: "rel"}
+    for o in _dos_slots(img):
+        t = img[o + 2]
+        if t == 0:
+            continue
+        n = img[o + 5:o + 21].rstrip(b"\xa0").decode("latin-1").lower()
+        blocks = img[o + 30] | (img[o + 31] << 8)
+        kind = ("" if t & 0x80 else "*") + kinds.get(t & 7, "???") + ("<" if t & 0x40 else "")
+        lines.append(f'{blocks:<4} "{n}"'.ljust(24) + f" {kind}")
+    lines.append("400 blocks free.")
+    return "\n".join(lines)
+
+
+def _dos_write(img, name, data, ftype):
+    slots = [o for o in _dos_slots(img) if img[o + 2] == 0]
+    if not slots:
+        return "72,disk full,00,00"
+    used = {(img[o + 3], img[o + 4]) for o in _dos_slots(img) if img[o + 2]}
+    free = [(t, x) for t in range(19, 36) for x in range(_SPT[t - 1]) if (t, x) not in used]
+    chunks = [data[i:i + 254] for i in range(0, max(len(data), 1), 254)]
+    chain = free[:len(chunks)]
+    for j, ((t, x), chunk) in enumerate(zip(chain, chunks)):
+        off = (sum(_SPT[:t - 1]) + x) * 256
+        blk = bytearray(256)
+        blk[0:2] = bytes(chain[j + 1]) if j + 1 < len(chain) else bytes([0, len(chunk) + 1])
+        blk[2:2 + len(chunk)] = chunk
+        img[off:off + 256] = blk
+    o = slots[0]
+    img[o + 2] = ftype
+    img[o + 3], img[o + 4] = chain[0]
+    img[o + 5:o + 21] = name.upper().encode("latin-1")[:16].ljust(16, b"\xa0")
+    img[o + 30], img[o + 31] = len(chain) & 0xFF, len(chain) >> 8
+    return None
+
+
+def _dos_scratch(img, names):
+    n = 0
+    for o in _dos_slots(img):
+        if img[o + 2] and img[o + 5:o + 21].rstrip(b"\xa0").decode("latin-1") in names:
+            img[o + 2] = 0
+            n += 1
+    return n
+
+
+def _image(sc):
+    return bytearray(_bytes(sc["disk"]))
+
+
+def _save_image(sc, img):
+    with open(sc["disk"], "wb") as f:
+        f.write(img)
+
+
 def cbmctrl(args, sc):
     cmd = args[0]
     if cmd == "detect":
@@ -92,9 +169,21 @@ def cbmctrl(args, sc):
     elif cmd == "reset":
         pass
     elif cmd == "status":
-        print(_next(sc, "status", "00, ok,00,00"))
+        pending = os.path.join(STATE, "status.pending")
+        if os.path.exists(pending):
+            print(_text(pending))
+            os.remove(pending)
+        else:
+            print(_next(sc, "status", "00, ok,00,00"))
     elif cmd == "command":
-        pass
+        if sc.get("dos") and args[2].startswith("S0:"):
+            img = _image(sc)
+            n = _dos_scratch(img, args[2][3:].split(","))
+            _save_image(sc, img)
+            with open(os.path.join(STATE, "status.pending"), "w") as f:
+                f.write(f"01, files scratched,{n:02d},00")
+    elif cmd == "dir" and sc.get("dos") and "dir" not in sc:
+        print(_dos_listing(_image(sc)))
     elif cmd == "dir":
         v = _next(sc, "dir", '0 ."empty" 01 2a\n664 blocks free.')
         if isinstance(v, dict):                 # {"out": ..., "rc": ...}
@@ -149,6 +238,17 @@ def cbmread(args, sc):
 
 
 def cbmwrite(args, sc):
+    if sc.get("dos"):
+        name = args[args.index("-o") + 1] if "-o" in args else os.path.basename(args[-1])
+        ftype = {".seq": 0x81, ".usr": 0x83}.get(os.path.splitext(args[-1])[1].lower(), 0x82)
+        img = _image(sc)
+        err = _dos_write(img, name, _bytes(args[-1]), ftype)
+        if err:
+            print(f"[Fatal] could not open file for writing: {err}")
+            return 0
+        _save_image(sc, img)
+        print("[Info] 00, OK,00,00")
+        return 0
     entry = sc.get("cbmwrite", {})
     print(entry.get("out", ""))
     return entry.get("rc", 0)

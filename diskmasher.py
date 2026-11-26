@@ -11,7 +11,6 @@ import math
 import os
 import pty
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -663,18 +662,62 @@ def _petscii_key(raw):
     return "".join(out)
 
 
-def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_event=None,
-                       enter_critical=None):
-    """Move the `index`th listed file to the first directory slot, so LOAD"*" loads it
-    (after a drive reset or power-on, "*" means the first file in the directory). The
-    other files keep their order; file data and the BAM are not touched.
+def _entry_name(body):
+    """The name bytes of a 30-byte directory entry body, without the $A0 padding."""
+    return bytes(body[3:19]).rstrip(b"\xa0")
+
+
+def directory_sort_order(bodies, first=(), sort=True):
+    """A new order (indices into `bodies`, the listed entries' 30-byte bodies in directory
+    order) for Sort and FB-ify. Entries whose name is in `first` (raw PETSCII names, e.g.
+    b"FB") come first, in the order `first` gives; then, with sort, closed or open PRGs
+    A–Z, then every other type A–Z (Antti, 2026-11-26); without sort, the rest keep their
+    order. A–Z compares the raw PETSCII name bytes, so digits and spaces sort before
+    letters, as on a C64; equal names keep their order."""
+    rank = {n: i for i, n in enumerate(first)}
+    head = sorted((i for i, b in enumerate(bodies) if _entry_name(b) in rank),
+                  key=lambda i: rank[_entry_name(bodies[i])])
+    rest = [i for i in range(len(bodies)) if i not in head]
+    if sort:
+        rest.sort(key=lambda i: ((bodies[i][0] & 0x07) != 0x02, _entry_name(bodies[i])))
+    return head + rest
+
+
+def reorder_directory(sectors, order):
+    """The directory sectors (256-byte blocks in chain order) rewritten so the listed
+    entries (type byte not 0) come in `order` (indices into the listed entries) from the
+    first slot on, followed by the unlisted (scratched or empty) slots in their old order.
+    Only bytes 2–31 of each 32-byte slot move: the chain links and the BAM are untouched,
+    and so is every file's data. Pure: no drive access; used for disks and images alike."""
+    slots = [(i, k) for i in range(len(sectors)) for k in range(8)]
+
+    def body(i, k):
+        return bytes(sectors[i][32 * k + 2:32 * k + 32])
+    listed = [body(i, k) for i, k in slots if sectors[i][32 * k + 2] != 0]
+    unlisted = [body(i, k) for i, k in slots if sectors[i][32 * k + 2] == 0]
+    if sorted(order) != list(range(len(listed))):
+        raise ValueError("order must name every listed entry once")
+    new = [bytearray(sec) for sec in sectors]
+    for (i, k), b in zip(slots, [listed[j] for j in order] + unlisted):
+        new[i][32 * k + 2:32 * k + 32] = b
+    return [bytes(sec) for sec in new]
+
+
+def rewrite_directory(listing, choose, what, on_step=None, proc_store=None, cancel_event=None,
+                      enter_critical=None):
+    """Rewrite the directory on the disk in DRIVE in a new order; file data and the BAM are
+    not touched. The engine of Make first, Sort and FB-ify.
 
     listing: the right pane's entries [(blocks, name, type)] in directory order; the
     directory read from the disk must match it (else the disk was changed since).
-    Steps: bump + seek 18 (the drive learns the disk ID), read the chain from 18/1,
+    choose(bodies) gets the listed entries' 30-byte bodies and returns (order, None), or
+    (None, reason) to refuse; `order` is for reorder_directory. what: words for the backup
+    note and the log ("sort the directory").
+    Steps: reset, bump + seek 18 (the drive learns the disk ID), read the chain from 18/1,
     check, save the original sectors to DIR_BACKUP_DIR, write only the changed sectors
     (enter_critical() is called first and turns Cancel off), read them back, `I`.
-    Returns (ok, message, backup)."""
+    Returns (ok, message, backup): message is None when it worked (the caller words it),
+    "unchanged" when the directory is already in that order (nothing written)."""
     def step(text):
         if on_step:
             on_step(text)
@@ -682,7 +725,7 @@ def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_eve
     def cancelled():
         return cancel_event is not None and cancel_event.is_set()
 
-    log_event(f"--- move listed file {index} to the first directory slot on drive {DRIVE}")
+    log_event(f"--- {what} on drive {DRIVE}")
     step("Preparing the drive…")
     reset_and_settle()
     if cancelled():
@@ -720,34 +763,22 @@ def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_eve
             sectors.append((t, s, data))
             t, s = data[0], data[1]
 
-        slots = [(i, k) for i in range(len(sectors)) for k in range(8)]
-        def body(i, k):
-            return sectors[i][2][32 * k + 2:32 * k + 32]
-        listed = [(i, k) for i, k in slots if body(i, k)[0] != 0]
-
-        same = len(listed) == len(listing) and all(
+        bodies = [data[32 * k + 2:32 * k + 32] for _, _, data in sectors for k in range(8)
+                  if data[32 * k + 2] != 0]
+        same = len(bodies) == len(listing) and all(
             (b[28] | (b[29] << 8)) == blocks and
-            _petscii_key(b[3:19].rstrip(b"\xa0")) == _petscii_key(name.encode("latin-1", "replace"))
-            for (i, k), (blocks, name, _) in zip(listed, listing) for b in [body(i, k)])
+            _petscii_key(_entry_name(b)) == _petscii_key(name.encode("latin-1", "replace"))
+            for b, (blocks, name, _) in zip(bodies, listing))
         if not same:
             return False, ("the directory on the disk doesn't match the listing (was the disk "
                            "changed?); refresh and try again"), None
-        if not 0 <= index < len(listed):
-            return False, "no such file in the listing", None
-        ci, ck = listed[index]
-        chosen = body(ci, ck)
-        name = bytes(chosen[3:19]).rstrip(b"\xa0").decode("latin-1")
-        if (ci, ck) == slots[0]:
-            return True, f'"{name}" is already the first file', None
-        if chosen[0] & 0x87 != 0x82:
-            return False, (f'"{name}" is not a properly closed PRG file; LOAD"*" loads '
-                           "programs"), None
-
-        order = [chosen] + [body(i, k) for i, k in slots if (i, k) != (ci, ck)]
-        new = [bytearray(data) for _, _, data in sectors]
-        for (i, k), b in zip(slots, order):
-            new[i][32 * k + 2:32 * k + 32] = b
-        changed = [i for i in range(len(sectors)) if bytes(new[i]) != sectors[i][2]]
+        order, refusal = choose(bodies)
+        if refusal:
+            return False, refusal, None
+        new = reorder_directory([data for _, _, data in sectors], order)
+        changed = [i for i in range(len(sectors)) if new[i] != sectors[i][2]]
+        if not changed:
+            return True, "unchanged", None
 
         # From here on Cancel is off (enter_critical, from the task dialog): a directory
         # must never be left half rewritten.
@@ -757,31 +788,63 @@ def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_eve
         disk = re.sub(r'[^a-z0-9_-]+', "_", bam[0x90:0xA0].rstrip(b"\xa0")
                       .decode("latin-1").lower()).strip("_") or "disk"
         backup = os.path.join(DIR_BACKUP_DIR, f"{disk}-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        n = 2
+        while os.path.exists(backup):         # two rewrites in the same second
+            backup = backup.rsplit(".", 1)[0].rsplit("~", 1)[0] + f"~{n}.json"
+            n += 1
         with open(backup, "w") as f:
             json.dump({"drive": DRIVE, "disk_name": bam[0x90:0xA0].hex(),
                        "disk_id": bam[0xA2:0xA4].hex(), "made": time.strftime("%Y-%m-%d %H:%M:%S"),
-                       "note": "original directory sectors before moving a file to the first "
-                               "slot; restore with restore_directory_backup()",
+                       "note": f"original directory sectors before: {what}; restore with "
+                               "restore_directory_backup()",
                        "sectors": {f"{t}/{s}": data.hex() for t, s, data in sectors}}, f, indent=1)
         log_event(f"--- directory backup: {backup}")
 
         step("Writing the directory…")
         for i in changed:                     # not cancellable: never leave half a directory
-            err = _write_sector(sectors[i][0], sectors[i][1], bytes(new[i]), tmp)
+            err = _write_sector(sectors[i][0], sectors[i][1], new[i], tmp)
             if err:
                 return False, (f"writing 18/{sectors[i][1]} failed: {err}. The original "
                                f"directory is saved in {backup}"), backup
         step("Checking what was written…")
         for i in changed:
             data, err = _read_sector(sectors[i][0], sectors[i][1], tmp)
-            if err or data != bytes(new[i]):
+            if err or data != new[i]:
                 return False, (f"18/{sectors[i][1]} doesn't read back as written "
                                f"({err or 'different bytes'}). The original directory is "
                                f"saved in {backup}"), backup
     _run_bounded(["cbmctrl", "command", DRIVE, "I"], 10)
     drive_status()
-    log_event(f"--- {name} is now the first file")
-    return True, f'"{name}" is now the first file: LOAD"*" loads it', backup
+    log_event(f"--- done: {what}")
+    return True, None, backup
+
+
+def move_to_first_slot(index, listing, on_step=None, proc_store=None, cancel_event=None,
+                       enter_critical=None):
+    """Move the `index`th listed file to the first directory slot, so LOAD"*" loads it
+    (after a drive reset or power-on, "*" means the first file in the directory). The
+    other files keep their order (scratched slots move behind them); file data and the
+    BAM are not touched. See rewrite_directory. Returns (ok, message, backup)."""
+    if not 0 <= index < len(listing):
+        return False, "no such file in the listing", None
+    if index == 0:
+        return True, f'"{listing[0][1]}" is already the first file', None
+    picked = {}
+
+    def choose(bodies):
+        b = bodies[index]
+        picked["name"] = _entry_name(b).decode("latin-1")
+        if b[0] & 0x87 != 0x82:
+            return None, (f'"{picked["name"]}" is not a properly closed PRG file; LOAD"*" '
+                          "loads programs")
+        return [index] + [i for i in range(len(bodies)) if i != index], None
+
+    ok, msg, backup = rewrite_directory(listing, choose, f"move listed file {index} to the "
+                                        "first directory slot", on_step, proc_store,
+                                        cancel_event, enter_critical)
+    if ok:
+        msg = f'"{picked["name"]}" is now the first file: LOAD"*" loads it'
+    return ok, msg, backup
 
 
 def restore_directory_backup(path):
@@ -3208,10 +3271,13 @@ class DiskMasher(tk.Tk):
 
         self._start_op('Erasing', run)
 
-    def _add_image_frame(self, dlg, row, enabled=True):
-        """The 'Safety copy' section of the Sort and FB-ify dialogs.
-        The whole disk is always read first; this only chooses whether the image is kept.
-        Returns a function giving (keep, path); call it before destroying dlg."""
+    def _add_image_frame(self, dlg, row):
+        """The 'Safety copy' section of the Sort and FB-ify dialogs: an optional full disk
+        image, read before anything is changed (Antti, 2026-11-26: if the disk ever becomes
+        unreadable, the image can be written to another one). The directory alone is always
+        backed up, which is enough to undo the reordering itself.
+        Returns a function giving the image path, or None when not wanted; call it before
+        destroying dlg."""
         hdr      = self.cbm_pane._hdr.get()
         m        = re.search(r'"(.+?)"', hdr)
         diskname = re.sub(r'[^a-zA-Z0-9_-]', '_', self.cbm_pane.disk_name.strip()
@@ -3226,14 +3292,13 @@ class DiskMasher(tk.Tk):
         frame = ttk.LabelFrame(dlg, text="Safety copy", padding=(8, 4))
         frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         ttk.Label(frame, foreground="gray", justify="left",
-                  text=("Reads the whole disk first and checks it (about 1 minute).\n"
-                        "Nothing is changed if the check finds a problem.") if enabled else
-                       "The disk is empty: nothing to copy.").grid(
+                  text="Only the directory is rewritten, and it's backed up first.\n"
+                       "A full image (1–2 minutes) lets you restore the whole disk\n"
+                       "onto another one if this disk ever fails.").grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
-        var = tk.BooleanVar(value=enabled)
-        cb = ttk.Checkbutton(frame, text="Keep the image afterwards", variable=var,
-                             command=lambda: _toggle())
-        cb.grid(row=1, column=0, columnspan=3, sticky="w")
+        var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="Save a full disk image first", variable=var,
+                        command=lambda: _toggle()).grid(row=1, column=0, columnspan=3, sticky="w")
         ttk.Label(frame, text="Path:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
         path_var = tk.StringVar(value=default)
         entry = ttk.Entry(frame, textvariable=path_var, width=34)
@@ -3241,252 +3306,162 @@ class DiskMasher(tk.Tk):
 
         def _toggle():
             entry.configure(state="normal" if var.get() else "disabled")
-        if not enabled:
-            cb.configure(state="disabled")
         _toggle()
-        return lambda: (var.get(), path_var.get().strip() or default)
+        return lambda: (path_var.get().strip() or default) if var.get() else None
 
-    def _rewrite_disk(self, verb, snap, write_order, fb_files, keep_image, image_path):
-        """Shared engine of Sort and FB-ify: scratch the disk and write it back.
+    def _fb_fit(self, fb_files):
+        """(blocks FB needs, blocks available, FB names already on the disk). FB files
+        already there are replaced, so their blocks count as available."""
+        need = sum(math.ceil(os.path.getsize(p) / 254) for _, p in fb_files)
+        names = {n.upper() for n, _ in fb_files}
+        there = [(b, n) for b, n, _ in self.cbm_pane._entries if n.upper() in names]
+        bf = self.cbm_pane.blocks_free()
+        return need, (None if bf is None else bf + sum(b for b, _ in there)), [n for _, n in there]
 
-        Steps: 1 check the disk (tracks 18 and 36), 2 read the whole disk to an image
-        (40 tracks when track 36 is formatted) and analyse it, 3 read every file,
-        4 scratch and write FB files + write_order. Nothing is changed unless 1–3 all pass,
-        so an unsuitable disk (double-sided, files beyond track 35, read errors in files,
-        unsupported file types, or a disk swapped since the listing) is refused untouched.
-        If step 4 fails or is cancelled, the read files are moved to a rescue folder next
-        to the image, and the image is kept even if keep_image is off."""
+    def _arrange_disk(self, verb, listing, sort, fb_files, image_path):
+        """Shared worker of Sort and FB-ify: rewrite the directory only (rewrite_directory).
+
+        Steps, each only if wanted: save a full image (probe + d64copy; nothing changes if
+        it fails), write the FB files (an FB already on the disk is scratched first), then
+        the new directory order: FB files first, then with sort PRGs A–Z and the rest A–Z,
+        else the rest in their old order. File data is never moved or rewritten."""
         set_msg, close, cancel_event, proc_store = self._make_task_dialog(
-            f"{verb} disk…", "Starting…")
+            f"{verb} disk", "Starting…")
         self._set_status(f"{verb} disk…")
-        steps = 4 if snap else 1
+        steps = (["image"] if image_path else []) + (["fb"] if fb_files else []) + ["dir"]
 
-        def _push_dir():
-            raw = cbm_dir(DRIVE)
-            self.after(0, lambda r=raw: self.cbm_pane._apply_dir(r))
+        def det(what):
+            return f"Step {steps.index(what) + 1} of {len(steps)}"
 
         def run():
-            outcome = {"abort": None, "errors": [], "rescue": None, "image": None,
-                       "touched": False}
-            tmpdir = tempfile.mkdtemp(prefix="diskmasher-")
-            part   = None
-            local_copy = {}     # index in snap → local file read in step 3
-            rd_stats   = {}
+            o = {"error": None, "image": None, "msg": None, "touched": False, "backup": None}
 
             def done():
                 close()
-                o = outcome
+                if cancel_event.is_set() and not o["touched"]:
+                    return              # _cancel_and_recover reports and refreshes
                 saved = f"\n\nDisk image: {o['image']}" if o["image"] else ""
-                if o["rescue"]:
-                    messagebox.showerror(f"{verb} incomplete",
-                        f"{verb} stopped after the disk was scratched.\n\n"
-                        + ("\n".join(o["errors"]) + "\n\n" if o["errors"] else "")
-                        + f"The files read from the disk are in:\n{o['rescue']}" + saved)
-                    self._set_status(f"{verb} incomplete — files saved in rescue folder.")
-                elif o["abort"]:
-                    note = f"\n\n{o['note']}" if o.get("note") else ""
-                    messagebox.showerror(f"{verb} not done", o["abort"] + note + saved)
-                    self._set_status(f"{verb} not done — disk unchanged.")
-                elif cancel_event.is_set():
-                    self._set_status(f"{verb} cancelled — disk unchanged.")
-                elif o["errors"]:
-                    messagebox.showerror(f"{verb} errors", "\n".join(o["errors"]) + saved)
-                    self._set_status(f"{verb} completed with errors.")
+                if o["error"]:
+                    state = ("The disk was not changed." if not o["touched"] else
+                             "The FB files were written, but the directory order wasn't "
+                             "changed." if not o["backup"] else "")
+                    messagebox.showerror(f"{verb} not done",
+                                         f"{o['error']}" + (f"\n\n{state}" if state else "") + saved)
+                    self._set_status(f"{verb} not done.")
                 else:
-                    self._set_status(f"{verb} complete." +
-                                     (f" Image saved: {o['image']}" if o["image"] else ""))
-                if o["image"] or o["rescue"]:
+                    self._set_status(o["msg"] + (f" Image saved: {o['image']}" if o["image"] else ""))
+                if o["image"]:
                     self.fs_pane._load()
-                if not cancel_event.is_set():
-                    self.cbm_pane.refresh()
+                self.cbm_pane.refresh()
 
             try:
-                if snap:
-                    # --- Step 1: quick check ---
-                    set_msg("Reading tracks 18 and 36…", detail=f"Step 1 of {steps} · Checking the disk")
+                nonlocal_listing = listing
+                if image_path and os.path.exists(image_path):
+                    o["error"] = f"{os.path.basename(image_path)} already exists."
+                    return
+                pr = None
+                if image_path or fb_files:
+                    # The disk check: the image needs it for 35/40 tracks, FB to refuse a
+                    # double-sided disk (the file would be written by the drive's 1541-mode
+                    # DOS, which knows one side only; untested, so not allowed).
+                    set_msg("Checking the disk…", detail=f"{det(steps[0])} · Checking the disk")
                     pr = probe_disk(proc_store, cancel_event)
                     if cancel_event.is_set():
                         return
                     if pr["error"]:
-                        outcome["abort"] = f"Could not check the disk: {pr['error']}.\n\nDisk unchanged."
+                        o["error"] = f"Could not check the disk: {pr['error']}."
                         return
-                    if pr["double_sided"]:
-                        outcome["abort"] = ("This is a double-sided (1571) disk. "
-                                            f"{verb} only handles single-sided disks so far.\n\nDisk unchanged.")
+                    if fb_files and pr["double_sided"]:
+                        o["error"] = ("This is a double-sided (1571) disk: adding FB to one isn't "
+                                      "supported yet. Sort without FB works.")
                         return
-                    # If track 36 couldn't be checked, 35 tracks is still safe here: Sort/FB-ify
-                    # never write beyond 35, and a file reaching track 36 shows up in the
-                    # analysis as a chain pointing outside the image.
+                if image_path:
+                    d2 = f"{det('image')} · Saving a full disk image"
                     tracks = 40 if (pr["t36_readable"] or pr["t36_partial"]) else 35
+                    part = image_path + ".part"
+                    stats = {}
+                    err = read_disk_to_file(
+                        part, tracks,
+                        lambda t, fr: set_msg(f"Track {t} of {tracks}", fraction=fr, detail=d2),
+                        proc_store, cancel_event, stats)
+                    if cancel_event.is_set() or err:
+                        if os.path.exists(part):
+                            os.unlink(part)
+                        if err:
+                            o["error"] = f"Saving the disk image failed ({err})."
+                        return
+                    os.rename(part, image_path)
+                    o["image"] = image_path
+                    if stats.get("copied") is not None and stats["copied"] < stats["expected"]:
+                        o["error"] = (f"{stats['expected'] - stats['copied']} of {stats['expected']} "
+                                      "blocks couldn't be read, so the image isn't a full copy. "
+                                      "Stopped before changing anything.")
+                        return
 
-                    # --- Step 2: whole-disk read + analysis ---
-                    part = (image_path + ".part") if keep_image else os.path.join(tmpdir, "disk.d64")
-                    det2 = f"Step 2 of {steps} · Reading the whole disk ({tracks} tracks)"
-                    set_msg("Starting…", detail=det2)
-                    err = read_disk_to_file(part, tracks,
-                        lambda t, f: set_msg(f"Track {t} of {tracks}", fraction=f, detail=det2),
-                        proc_store, cancel_event, rd_stats)
-                    if cancel_event.is_set():
-                        return
-                    if err:
-                        outcome["abort"] = f"Reading the disk failed ({err}).\n\nDisk unchanged."
-                        return
-                    info = analyze_image(_read_bytes(part))
-                    if rd_stats.get("copied") is not None and rd_stats["copied"] < rd_stats["expected"]:
-                        outcome["note"] = (f"{rd_stats['expected'] - rd_stats['copied']} of "
-                                           f"{rd_stats['expected']} blocks couldn't be read.")
-                    if keep_image:
-                        if os.path.exists(image_path):
-                            outcome["abort"] = f"{os.path.basename(image_path)} already exists.\n\nDisk unchanged."
+                if fb_files:
+                    d3 = f"{det('fb')} · Writing FB"
+                    set_msg("Preparing the drive…", detail=d3)
+                    reset_and_settle()
+                    fb_names = {n.upper() for n, _ in fb_files}
+                    old = [n.upper() for _, n, _ in nonlocal_listing if n.upper() in fb_names]
+                    if old and not cancel_event.is_set():
+                        set_msg("Removing the old FB…", detail=d3)
+                        o["touched"] = True
+                        _run_bounded(["cbmctrl", "command", DRIVE, "S0:" + ",".join(old)], 30)
+                        code, st = drive_status()
+                        if code != 1:
+                            o["error"] = f"Removing the old FB failed (drive status: {st})."
                             return
-                        os.rename(part, image_path)
-                        part = None
-                        outcome["image"] = image_path
-                    names_img  = [f["name"].upper() for f in info["files"]]
-                    names_pane = [n.upper() for _, n, _ in snap]
-                    if len(names_img) != len(names_pane) or any(
-                            a != b for a, b in zip(names_img, names_pane) if a.isascii() and b.isascii()):
-                        outcome["abort"] = ("The disk doesn't match the directory shown "
-                                            "(was it swapped?). Refresh and try again.\n\nDisk unchanged.")
-                        return
-                    if info["problems"]:
-                        outcome["abort"] = (f"{verb} would lose data on this disk:\n\n• "
-                                            + "\n• ".join(info["problems"]) + "\n\nDisk unchanged.")
-                        return
-
-                    # --- Step 3: read every file ---
-                    # Each file goes to its own subfolder first, then becomes
-                    # "NNN-<name>" (NNN = directory position), so two entries with the same
-                    # name can't overwrite each other and the rescue folder keeps the order.
-                    det3 = f"Step 3 of {steps} · Reading files"
-                    # Progress by blocks, not files: a 1-block file and a 117-block one
-                    # take very different times.
-                    w3 = [max(1, blk) for blk, _, _ in snap]
-                    for i, (blk, name, ftype) in enumerate(snap, 1):
+                        # Writes right after a scratch failed with 74 until a reset (1541,
+                        # 2026-11-26; opencbm-tools.md).
+                        reset_and_settle()
+                    for i, (name, path) in enumerate(fb_files, 1):
                         if cancel_event.is_set():
                             return
-                        set_msg(f"[{i}/{len(snap)}]  {cbm_display(name)}", fraction=sum(w3[:i - 1]) / sum(w3), detail=det3)
-                        sub = tempfile.mkdtemp(dir=tmpdir)
-                        err = cbm_read_file(DRIVE, name, sub, proc_store, ftype)
-                        got = os.listdir(sub)
-                        if not err and len(got) != 1:
-                            err = f"expected one file, got {len(got)}"
+                        set_msg(f"[{i}/{len(fb_files)}]  Writing {name}",
+                                fraction=(i - 1) / len(fb_files), detail=d3)
+                        o["touched"] = True
+                        err = cbm_write_file(DRIVE, path, name.lower(), proc_store)
                         if err:
-                            outcome["abort"] = f"Reading {cbm_display(name)} failed:\n{err}\n\nDisk unchanged."
+                            o["error"] = f"Writing {name} failed: {err}"
                             return
-                        local_copy[i - 1] = os.path.join(tmpdir, f"{i:03d}-{got[0]}")
-                        os.rename(os.path.join(sub, got[0]), local_copy[i - 1])
-                        os.rmdir(sub)
                     if cancel_event.is_set():
-                        return
-
-                    # --- Step 4: scratch ---
-                    det4 = f"Step 4 of {steps} · Rewriting the disk"
-                    set_msg("Scratching all files…", detail=det4)
-                    # No reset here: it made the scratch run at 1 MHz (170 s instead of 66 s
-                    # for 13 files on a 1571) and didn't help. The count in the reply isn't
-                    # reliable on a 1571 (long scratches report 22, 42, "5;" for 6, 10 and 13
-                    # files, at 1 and 2 MHz alike; short ones are right), so the empty
-                    # directory below is the proof (2026-11-26, drive 9).
-                    outcome["touched"] = True
-                    _run_bounded(["cbmctrl", "command", DRIVE, "S:*"], 30)
-                    # Wait for the drive to finish before any other bus request, then
-                    # check it scratched ("01, FILES SCRATCHED,nn") and that a real
-                    # directory listing (not an error) shows no file left. The listing is
-                    # the proof; a count that doesn't match or can't be read is logged.
-                    # A full-disk scratch takes over two minutes at 1 MHz on a 1571
-                    # (170 s for 13 files, 2026-11-26); wait up to 10 minutes.
-                    code, st = drive_status(timeout=600)
-                    m = re.match(r'\s*01\s*,[^,]*,\s*(\d+)', st)
-                    if code == 1 and (not m or int(m.group(1)) != len(snap)):
-                        log_event(f"--- scratch status count unexpected ({st!r}, "
-                                  f"{len(snap)} files): checking the directory instead")
-                    if code != 1:
-                        outcome["errors"].append(
-                            f"The scratch failed (drive status: {st}). "
-                            "Nothing was written.")
                         return
                     raw = cbm_dir(DRIVE)
-                    _, _, left, free = parse_cbm_dir(raw)
-                    if raw.startswith("Error") or free is None or left:
-                        outcome["errors"].append(
-                            f"After the scratch the directory shows {len(left)} file(s) "
-                            f"or couldn't be read ({raw.splitlines()[-1] if raw else 'empty'}). "
-                            "Nothing was written.")
+                    _, _, nonlocal_listing, _ = parse_cbm_dir(raw)
+                    if raw.startswith("Error"):
+                        o["error"] = f"Reading the directory after writing FB failed: {raw}"
                         return
-                    # Reset after the scratch, before the writes: without it every
-                    # cbmwrite failed at once with 74,DRIVE NOT READY,18,00 on a 1541
-                    # (2026-11-26, no 2 MHz mode there), while the scratch and the
-                    # listing had worked. Resetting here costs nothing (the scratch is done).
-                    reset_and_settle()
-                    if cancel_event.is_set():
-                        return
-                else:
-                    det4 = f"Step 1 of 1 · Writing"
 
-                # --- Step 4 (cont.): write FB files and the files back ---
-                jobs = [(n.lower(), p) for n, p in fb_files]
-                for entry in write_order:
-                    # write_order holds the same tuples as snap; `is` keeps duplicates apart.
-                    idx = next(i for i, e in enumerate(snap) if e is entry)
-                    jobs.append((entry[1], local_copy.get(idx, "")))
-                w4 = [max(1, (os.path.getsize(p) + 253) // 254) if os.path.exists(p) else 1
-                      for _, p in jobs]               # blocks, as in step 3
-                for i, (name, local) in enumerate(jobs, 1):
-                    if cancel_event.is_set():
-                        return
-                    set_msg(f"[{i}/{len(jobs)}]  Writing {cbm_display(name)}",
-                            fraction=sum(w4[:i - 1]) / sum(w4), detail=det4)
-                    if not os.path.exists(local):
-                        outcome["errors"].append(f"{cbm_display(name)}: local copy missing")
-                        continue
-                    err = cbm_write_file(DRIVE, local, name, proc_store)
-                    if err:
-                        outcome["errors"].append(f"Write {cbm_display(name)}: {err}")
-                    else:
-                        _push_dir()
+                d4 = f"{det('dir')} · Rewriting the directory"
+                first = [n.encode("latin-1") for n, _ in fb_files]
+
+                def choose(bodies):
+                    return directory_sort_order(bodies, first=first, sort=sort), None
+                ok, msg, backup = rewrite_directory(
+                    nonlocal_listing, choose, f"{verb.lower()} the directory",
+                    on_step=lambda t: set_msg(t, detail=d4), proc_store=proc_store,
+                    cancel_event=cancel_event, enter_critical=set_msg.enter_critical)
+                o["backup"] = backup
+                if cancel_event.is_set() and msg == "cancelled":
+                    return
+                if not ok:
+                    o["error"] = msg[0].upper() + msg[1:] + "."
+                    o["touched"] = o["touched"] or bool(backup)
+                    return
+                o["touched"] = True
+                if msg == "unchanged":
+                    o["msg"] = (f"{verb}: FB written; the directory was already in order."
+                                if fb_files else "The directory was already in order: nothing written.")
+                else:
+                    o["msg"] = (f"{verb} done: only the directory was rewritten "
+                                f"(backup: {os.path.basename(backup)}).")
             except Exception as e:
-                outcome["errors"].append(f"Unexpected error: {e}")
+                o["error"] = f"Unexpected error: {e}"
             finally:
-                failed_after_scratch = outcome["touched"] and (
-                    outcome["errors"] or cancel_event.is_set())
-                if failed_after_scratch:
-                    base = os.path.splitext(image_path)[0]
-                    rescue, n = base + "_rescue", 2
-                    while os.path.exists(rescue):
-                        rescue, n = f"{base}_rescue-{n}", n + 1
-                    try:
-                        os.makedirs(rescue)
-                        # Drop the "NNN-" order prefix, so writing a rescued file back with
-                        # Write gives it its original name; only a name clash gets "-2".
-                        for f in sorted(os.listdir(tmpdir)):
-                            src = os.path.join(tmpdir, f)
-                            if f == "disk.d64" or not os.path.isfile(src):
-                                continue
-                            stem, ext = os.path.splitext(re.sub(r'^\d{3}-', '', f))
-                            dest, n = os.path.join(rescue, stem + ext), 2
-                            while os.path.exists(dest):
-                                dest, n = os.path.join(rescue, f"{stem}-{n}{ext}"), n + 1
-                            shutil.move(src, dest)
-                        outcome["rescue"] = rescue
-                        if part and os.path.exists(part):   # image not kept: keep it now
-                            dest = image_path
-                            n = 2
-                            while os.path.exists(dest):
-                                dest = f"{base}-{n}.d64"; n += 1
-                            shutil.move(part, dest)
-                            outcome["image"] = dest
-                    except OSError as e:
-                        outcome["errors"].append(f"Could not save rescue copy: {e} (temp: {tmpdir})")
-                        tmpdir = None
-                if part and os.path.exists(part):
-                    try: os.unlink(part)
-                    except OSError: pass
-                if tmpdir:
-                    shutil.rmtree(tmpdir, ignore_errors=True)
                 self.after(0, done)
 
-        self._start_op(verb, run, local=True)
+        self._start_op(verb, run, local=bool(image_path))
 
     def _sort_disk(self):
         if not self.cbm_pane._entries:
@@ -3494,10 +3469,11 @@ class DiskMasher(tk.Tk):
             def _refresh():
                 raw = cbm_dir(DRIVE)
                 self.after(0, lambda: self.cbm_pane._apply_dir(raw))
-                self.after(0, self._sort_disk)
+                self.after(0, lambda: self._sort_disk() if self.cbm_pane._entries else
+                           self._set_status("Nothing to sort: the disk has no files."))
             self._start_op('Refreshing', _refresh)
             return
-        entries = self.cbm_pane._entries
+        entries = self.cbm_pane._entries[:]
 
         dlg = tk.Toplevel(self)
         dlg.title("Sort disk")
@@ -3511,49 +3487,67 @@ class DiskMasher(tk.Tk):
         fb_frame = ttk.LabelFrame(dlg, text="FB file browser", padding=(8, 4))
         fb_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
         ttk.Checkbutton(fb_frame, text="Add FB as first file",
-                        variable=fb_var, command=lambda: _toggle()).grid(
+                        variable=fb_var, command=lambda: _update()).grid(
             row=0, column=0, columnspan=2, sticky="w")
 
         plat_frame = ttk.LabelFrame(dlg, text="Platform", padding=(8, 4))
         plat_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
         plat_radios = []
         for plat in FB_PATHS:
-            rb = ttk.Radiobutton(plat_frame, text=plat, variable=plat_var, value=plat)
+            rb = ttk.Radiobutton(plat_frame, text=plat, variable=plat_var, value=plat,
+                                 command=lambda: _update())
             rb.pack(side="left", padx=8)
             plat_radios.append(rb)
 
-        def _toggle():
-            s = "normal" if fb_var.get() else "disabled"
-            for rb in plat_radios:
-                rb.configure(state=s)
-        _toggle()
-
         info_frame = ttk.LabelFrame(dlg, text="Disk", padding=(8, 6))
         info_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
-        prgs  = [(b, n, t) for b, n, t in entries if t.upper().lstrip("*") == "PRG"]
-        other = [(b, n, t) for b, n, t in entries if t.upper().lstrip("*") != "PRG"]
-        ttk.Label(info_frame, font=("Menlo", 10), anchor="w",
-                  text=f"Files on disk:  {len(entries)}\n"
-                       f"PRG files:      {len(prgs)}\n"
-                       f"Other (SEQ/USR/REL): {len(other)}").pack(fill="x")
+        n_prg = sum(1 for _, _, t in entries if "prg" in t.lower())
+        n_del = sum(1 for _, _, t in entries if "del" in t.lower())
+        info_var, verdict_var = tk.StringVar(), tk.StringVar()
+        ttk.Label(info_frame, textvariable=info_var, font=("Menlo", 10),
+                  justify="left").pack(anchor="w")
+        ttk.Label(info_frame, textvariable=verdict_var, font=("Menlo", 10, "bold"),
+                  justify="left").pack(anchor="w")
 
         get_image = self._add_image_frame(dlg, row=3)
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.grid(row=4, column=0, columnspan=2, pady=(4, 10))
+        sort_btn = ttk.Button(btn_frame, text="Sort", command=lambda: _do_sort())
+        sort_btn.pack(side="left", padx=8)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
+
+        def _update():
+            for rb in plat_radios:
+                rb.configure(state="normal" if fb_var.get() else "disabled")
+            text = (f"Files on disk:  {len(entries)}\n"
+                    f"PRG files:      {n_prg}  (first, A–Z)\n"
+                    f"Other types:    {len(entries) - n_prg}  (then A–Z)")
+            verdict, ok = "", True
+            if fb_var.get():
+                need, avail, there = self._fb_fit(FB_PATHS[plat_var.get()])
+                text += f"\nFB needs:       {need} blocks"
+                if there:
+                    text += f"  (replaces {', '.join(cbm_display(n) for n in there)})"
+                if avail is not None and need > avail:
+                    verdict, ok = f"FB won't fit: needs {need}, {avail} free.", False
+            info_var.set(text)
+            verdict_var.set(verdict)
+            sort_btn.configure(state="normal" if ok else "disabled")
+        _update()
 
         def _do_sort():
             fb_files = FB_PATHS[plat_var.get()] if fb_var.get() else []
-            snap     = entries[:]
-            keep, path = get_image()
+            image = get_image()
+            if n_del and not messagebox.askokcancel("Sort disk",
+                    f"This disk has {n_del} DEL entr{'y' if n_del == 1 else 'ies'}. They are "
+                    "often separator lines or directory art, which sorting would scramble: "
+                    "they'd be sorted A–Z with the other non-PRG files.\n\nSort anyway?",
+                    parent=dlg):
+                return
             dlg.destroy()
-            prgs  = sorted([e for e in snap if e[2].upper().lstrip("*").startswith("PRG")],
-                           key=lambda x: x[1].lower())
-            other = [e for e in snap if not e[2].upper().lstrip("*").startswith("PRG")]
-            self._rewrite_disk("Sort", snap, prgs + other, fb_files, keep, path)
+            self._arrange_disk("Sort", entries, True, fb_files, image)
 
-        ttk.Button(btn_frame, text="Sort", command=_do_sort).pack(side="left", padx=8)
-        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
         dlg.wait_window()
 
     def _fbify_disk(self):
@@ -3588,9 +3582,7 @@ class DiskMasher(tk.Tk):
         ttk.Label(info_frame, textvariable=verdict_var, font=("Menlo", 10, "bold"),
                   justify="left").pack(anchor="w")
 
-        # FB-ify scratches and rewrites every file, so it reads and checks the disk first;
-        # an empty disk has nothing to lose.
-        get_image = self._add_image_frame(dlg, row=2, enabled=bool(self.cbm_pane._entries))
+        get_image = self._add_image_frame(dlg, row=2)
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.grid(row=3, column=0, columnspan=2, pady=(4, 10))
@@ -3599,39 +3591,36 @@ class DiskMasher(tk.Tk):
         ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=8)
 
         def _update_info():
-            platform  = plat_var.get()
-            fb_files  = FB_PATHS[platform]
-            fb_blocks = sum(math.ceil(os.path.getsize(p) / 254) for _, p in fb_files)
-            bf        = self.cbm_pane.blocks_free()
-            entries   = self.cbm_pane._entries
-            if bf is None:
+            fb_files = FB_PATHS[plat_var.get()]
+            need, avail, there = self._fb_fit(fb_files)
+            entries = self.cbm_pane._entries
+            if avail is None:
                 info_var.set("Disk info unavailable — refresh first.")
                 verdict_var.set("")
                 proceed_btn.configure(state="disabled")
                 return
             n_files = len(fb_files)
             info_var.set(
-                f"Files on disk:  {len(entries)}\n"
-                f"Blocks free:    {bf}\n"
-                f"FB cost:        {fb_blocks} blocks  ({n_files} file{'s' if n_files > 1 else ''})"
-            )
-            if fb_blocks <= bf:
+                f"Files on disk:  {len(entries)}  (keep their order, after FB)\n"
+                f"Blocks free:    {self.cbm_pane.blocks_free()}\n"
+                f"FB cost:        {need} blocks  ({n_files} file{'s' if n_files > 1 else ''})"
+                + (f"\nReplaces:       {', '.join(cbm_display(n) for n in there)}" if there else ""))
+            if need <= avail:
                 verdict_var.set("Fits.")
                 proceed_btn.configure(state="normal")
             else:
-                verdict_var.set(f"Won't fit — need {fb_blocks}, have {bf}.")
+                verdict_var.set(f"Won't fit — need {need}, have {avail}.")
                 proceed_btn.configure(state="disabled")
 
         def _do_fbify():
             fb_files = FB_PATHS[plat_var.get()]
             entries  = self.cbm_pane._entries[:]
-            keep, path = get_image()
+            image = get_image()
             dlg.destroy()
-            self._rewrite_disk("FB-ify", entries, entries, fb_files, keep and bool(entries), path)
+            self._arrange_disk("FB-ify", entries, False, fb_files, image)
 
         _update_info()
         dlg.wait_window()
-
 
 def _check_single_instance():
     import atexit, signal

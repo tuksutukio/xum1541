@@ -63,7 +63,9 @@ def make_d64(tracks=35, name="TEST", files=(), errors=None, double_sided=False,
 
     # Directory: 8 entries per sector, chained 18/1, 18/4, 18/7, … like the DOS does.
     files = list(files)
-    dir_secs = [1 + 3 * n for n in range(max(1, (len(files) + 7) // 8))]
+    # The 1541 DOS's own order (interleave 3, wrapping on track 18's 19 sectors).
+    dos_order = [1, 4, 7, 10, 13, 16, 2, 5, 8, 11, 14, 17, 3, 6, 9, 12, 15, 18]
+    dir_secs = dos_order[:max(1, (len(files) + 7) // 8)]
     dir_data = {s: bytearray(256) for s in dir_secs}
     for n, s in enumerate(dir_secs):
         nxt = dir_secs[n + 1] if n + 1 < len(dir_secs) else None

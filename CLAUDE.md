@@ -52,9 +52,7 @@ to disk (`FB_PATHS` maps platform → files).
   "Frozen" bindtag swallows clicks and keys, the listbox stays enabled so `_load` can refill it). Task dialogs and
   the spinner aren't modal (no grab); the busy flag does that job. Pass `fresh=True` for an operation whose
   worker doesn't already start with a reset (Write/Read files, Read to image, Scratch, Rename/Copy): `_start_op`
-  runs `reset_and_settle()` first. Don't reset between Sort's file reads and its scratch: at 1 MHz the scratch takes
-  2.5× as long and gains nothing (opencbm-tools.md "FILES SCRATCHED count"); do reset after it, before the writes
-  (without it every `cbmwrite` failed with 74 on a 1541, 2026-11-26). `c1541` threads stay
+  runs `reset_and_settle()` first. `c1541` threads stay
   plain threads. Tested in `tests/test_busy.py`.
 - **Drive → Reset and Cancel share `_reset_and_check`:** `cbmctrl reset`, 2 s settle, detect; drives found →
   drive menu updated + refresh (which recovers a 74 head via `cbm_dir`); no answer → replug USB; no drive → power/cable.
@@ -72,12 +70,14 @@ to disk (`FB_PATHS` maps platform → files).
 - **Disk checking, on the drive:** `probe_disk()` reads tracks 18 and 36 (about 6 s) to learn the shape of the disk
   before a full read; `read_disk_to_file()` is the full read with progress, judged complete only by `d64copy`'s
   "N blocks copied." (it creates the file at full size up front).
-- **Sort and FB-ify share `_rewrite_disk`:** check, full read + analysis, read every file, and only then scratch
-  and rewrite. Anything risky stops it before the disk is touched; a failure after the scratch moves the read
-  files to a `*_rescue` folder next to the image and keeps the image.
-- **Drive command log:** every opencbm command (via `_run_bounded`, `stream_cmd`, `cbm_dir`, `cbm_detect`,
-  `cbm_read_file`, `cbm_write_file`) is logged to `~/Library/Logs/diskmasher.log` with duration, outcome and last
-  output lines; also Cancel, process stops and disk-check results. Read it first when a drive misbehaves.
+- **Sort, FB-ify and Make first rewrite only the directory** (2026-11-26; until then Sort and FB-ify scratched the
+  disk and wrote every file back, ~10 min, and failed on a 1541 with 74 on every write after the scratch).
+  `rewrite_directory(listing, choose, …)` is the engine (reads the chain from 18/1 via jobs, checks it against the
+  listing, backs it up, writes changed sectors, reads them back); `reorder_directory` (pure, also for images) and
+  `directory_sort_order` build the new order. `_arrange_disk` is the Sort/FB-ify worker: optional disk check + full
+  image, FB written with `cbmwrite` (an old FB scratched first, then a reset), then `rewrite_directory`. Tested on
+  the 1541 2026-11-26: sort 13.5 s, full re-read identical except 18/1 and 18/4, backup restore 9.9 s, `LOAD"*"`
+  gave the FB byte-identical.
 - **Track 36 in `probe_disk`:** all 17 sectors OK = present; none = 35-track disk; some = `t36_partial`, a decayed
   40-track disk: reads use 40 tracks, Write image without pre-format refuses.
 - **Erase (`erase_tracks`, drive code `drive/erase.s`):** the only code of ours that runs in the drive. Loaded to
