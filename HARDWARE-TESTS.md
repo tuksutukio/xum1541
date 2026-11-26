@@ -65,8 +65,8 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 | FB-ify (incl. replacing an FB) | ✓ 2026-11-26 | — | ✓ 2026-11-26 after a fix (replace got 74: head left on track 36) |
 | Sort + FB + full image | ✓ 2026-11-26 | — | — |
 | Rebuild (with format) | ✓ 2026-11-26 | — | ◐ 2026-11-26 (disk rebuilt right; the read-back stalled at track 2) |
-| Erase | — | — | ✓ 2026-11-25 (write protect honoured) |
-| Format (Disk → Format) | — | — | ✓ 2026-11-25 |
+| Erase | ✓ 2026-11-26 (whole disk, 29 s; native 1541 ROM) | — | ✓ 2026-11-25 (write protect honoured) |
+| Format (Disk → Format) | ✓ 2026-11-26 (`cbmforng`, 18 s, after Erase) | — | ✓ 2026-11-25 |
 | Cancel during a disk check | ✓ 2026-11-26 | — | — |
 | Cancel during an image read | — | ✓ 2026-11-25 (a 1571; unit not recorded) | |
 | UI walk-through, Sort and FB-ify dialogs | ✓ 2026-11-26 (Antti) | — | — |
@@ -93,3 +93,8 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 - **2026-11-26, round 1 (bus):** same two disks, swapped between the 1541 and drive 9: full reads 158 s (1541) and
   92 s (1571) with both drives on the bus, 87 s and 52 s with the drive alone; no stalls in 9 reads. Timings
   above from before ~19:54 were with the 1541 alone; from then until 20:50 with both drives on the bus.
+- **2026-11-26, 1541 alone on the bus (late evening):** Make first 11.4 s, `LOAD"*"` gave RELOADED byte-identical.
+  Copy and Rename each worked, but the next `cbmwrite` ended with `71,DIR ERROR` and left an entry the BAM didn't
+  count; after a reset writes worked (opencbm-tools.md). Erase of tracks 1–40: 29 s; afterwards track 18 was
+  unreadable and the directory answered 74, as for a never-formatted disk; `cbmforng` then formatted it in 18 s
+  (DISKNAME, 01, 664 blocks free).
