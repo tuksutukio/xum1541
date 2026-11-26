@@ -19,6 +19,9 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 - **Unattended long runs** while Antti is away (his offer): one drive, one test disk, a script that loops read-only
   full reads (and, on a sacrificial disk, write/read-back cycles), each with a no-progress watchdog, logging
   drive, uptime, duration, stalls and retries; a summary table at the end. Read-only loops can run on any disk.
+- **Minimise cable changes** (Antti, 2026-11-26: new-stock 6-pin DIN cables have flimsy connectors): batch all the
+  tests planned for a drive into one session on the bus, swap disks rather than drives where that answers the
+  question, and plan the order of drives ahead.
 - **Swap one thing at a time** when hunting a fault: the disk between drives, the drive on a unit (DIP switches),
   the devices on the bus. Two of each kind make the comparison.
 - **Update the matrix** after every hardware test, and mark cells stale when the code behind them changes.
