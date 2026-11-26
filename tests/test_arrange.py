@@ -177,6 +177,15 @@ class Arrange(ArrangeApp):
         self.assertIn("double-sided", self.errors[0][1])
         self.assertEqual(_bytes(self.image), self.original)
 
+    def test_fb_replace_after_the_disk_check_recovers_the_head(self):
+        # The disk check leaves the head on track 36; on a 35-track disk the scratch of
+        # the old FB then got 74 (1571, 2026-11-26).
+        listing = self.disk([f("FB", 1), f("ZED", 2)])        # no d64copy entries: the
+        self.run_it("FB-ify", listing, False, [("FB", FB16)], None)   # fake DOS answers
+        self.assertEqual(self.errors, [])
+        self.assertEqual(self.names(), ["FB", "ZED"])
+        self.assertEqual(file_data(_bytes(self.image), "FB"), _bytes(FB16))
+
     def test_sort_alone_needs_no_disk_check(self):
         listing = self.disk([f("ZED", 1), f("ALPHA", 2)])
         self.run_it("Sort", listing, True, [], None)

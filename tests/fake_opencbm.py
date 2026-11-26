@@ -175,6 +175,12 @@ def cbmctrl(args, sc):
             os.remove(pending)
         else:
             print(_next(sc, "status", "00, ok,00,00"))
+    elif cmd == "command" and sc.get("dos") and _head74():
+        if args[2] == "I":
+            _head_ok()
+        else:
+            with open(os.path.join(STATE, "status.pending"), "w") as f:
+                f.write("74,drive not ready,00,00")
     elif cmd == "command":
         if sc.get("dos") and args[2].startswith("S0:"):
             img = _image(sc)
@@ -183,7 +189,7 @@ def cbmctrl(args, sc):
             with open(os.path.join(STATE, "status.pending"), "w") as f:
                 f.write(f"01, files scratched,{n:02d},00")
     elif cmd == "dir" and sc.get("dos") and "dir" not in sc:
-        print(_dos_listing(_image(sc)))
+        print("74,drive not ready,00,00" if _head74() else _dos_listing(_image(sc)))
     elif cmd == "dir":
         v = _next(sc, "dir", '0 ."empty" 01 2a\n664 blocks free.')
         if isinstance(v, dict):                 # {"out": ..., "rc": ...}
@@ -236,8 +242,12 @@ def d64copy(args, sc):
             print("683 blocks copied.")
             return 0
         if start == "36":
+            # The head stays on track 36; on this 35-track disk the DOS then answers 74
+            # until an `I` (CLAUDE.md "74,DRIVE NOT READY can be the head").
+            open(os.path.join(STATE, "head74"), "w").close()
             print("[Fatal] 21,READ ERROR,36,00\n0 blocks copied.")
             return 0
+        _head_ok()
         with open(sc["disk"], "rb") as f, open(args[-1], "wb") as g:
             g.write(f.read())
         print("19 blocks copied." if start == "18" else "683 blocks copied.")
@@ -274,6 +284,15 @@ def cbmwrite(args, sc):
     entry = sc.get("cbmwrite", {})
     print(entry.get("out", ""))
     return entry.get("rc", 0)
+
+
+def _head74():
+    return os.path.exists(os.path.join(STATE, "head74"))
+
+
+def _head_ok():
+    if _head74():
+        os.remove(os.path.join(STATE, "head74"))
 
 
 def cbmforng(args, sc):

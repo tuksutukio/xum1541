@@ -3545,7 +3545,9 @@ class DiskMasher(tk.Tk):
                 if o["error"]:
                     state = ("The disk was not changed." if not o["touched"] else
                              "The FB files were written, but the directory order wasn't "
-                             "changed." if not o["backup"] else "")
+                             "changed." if o.get("fb_written") and not o["backup"] else
+                             "The disk may have been changed: refresh to see it." if not o["backup"]
+                             else "")
                     messagebox.showerror(f"{verb} not done",
                                          f"{o['error']}" + (f"\n\n{state}" if state else "") + saved)
                     self._set_status(f"{verb} not done.")
@@ -3604,6 +3606,11 @@ class DiskMasher(tk.Tk):
                     d3 = f"{det('fb')} · Writing FB"
                     set_msg("Preparing the drive…", detail=d3)
                     reset_and_settle()
+                    # The disk check leaves the head on track 36; on a 35-track disk the DOS
+                    # then answers 74 to everything after the reset until the head is
+                    # recovered (1571, 2026-11-26: the old FB's scratch got 74).
+                    if pr is not None:
+                        recover_head()
                     fb_names = {n.upper() for n, _ in fb_files}
                     old = [n.upper() for _, n, _ in nonlocal_listing if n.upper() in fb_names]
                     if old and not cancel_event.is_set():
@@ -3627,6 +3634,7 @@ class DiskMasher(tk.Tk):
                         if err:
                             o["error"] = f"Writing {name} failed: {err}"
                             return
+                        o["fb_written"] = True
                     if cancel_event.is_set():
                         return
                     raw = cbm_dir(DRIVE)
