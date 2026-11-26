@@ -46,30 +46,30 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
 
 ## Matrix
 
-| Operation | 1541 | 1571a | 1571b |
-|---|---|---|---|
-| Detect | ✓ 2026-11-26 | ✓ | ✓ |
-| Directory read | ✓ 2026-11-26 | ✓ 2026-11-25 | ✓ 2026-11-25 |
-| 74 head recovery (bump, seek 18, `I`) | ◐ 2026-11-26 (ran with no disk in: knocked, 21) | — | ✓ 2026-11-25 |
-| Disk check (tracks 18 + 36) | ✓ 2026-11-26 | — | ◐ 2026-11-25 (intermittent 30 s hang) |
-| Read disk to image (35 tracks) | ◐ 2026-11-26 (one misread, 13/5) | ✓ 2026-11-25 | ◐ 2026-11-26 (2 of 5 reads stalled early, at tracks 5 and 2) |
-| Write image, no format | ✓ 2026-11-26 | ✓ 2026-11-25 | ✓ 2026-11-26 (189 s) |
-| Write image with pre-format | — | — | ✓ 2026-11-26 (format 17 s) |
-| Read files (`cbmread`, PRG/SEQ/USR) | ✓ 2026-11-26 | — | ✓ 2026-11-25 |
-| Write files (`cbmwrite`) | ✗ 2026-11-26 after a scratch without reset (74) | ✗ 2026-11-25 after `d64copy` without reset (74) | ✓ 2026-11-25 |
-| Scratch, full disk (`S:*`) | ✓ 2026-11-26 (count right, 189 s) | — | ◐ 2026-11-26 (count unreliable) |
-| Rename / Copy (drive's R and C) | ◐ 2026-11-26 (next writes 71 until a reset, as on the 1571) | — | ◐ 2026-11-26 (next writes 71 until a reset) |
-| Make first | ✓ 2026-11-26 (11.4 s, `LOAD"*"` checked) | — | ✓ 2026-11-26 (shared engine, 12 s) |
-| Sort (directory only) | ✓ 2026-11-26 | — | ✓ 2026-11-26 (12 s) |
-| Restore a directory backup | ✓ 2026-11-26 | — | ✓ 2026-11-26 (8.1 s) |
-| FB-ify (incl. replacing an FB) | ✓ 2026-11-26 | — | ✓ 2026-11-26 after a fix (replace got 74: head left on track 36) |
-| Sort + FB + full image | ✓ 2026-11-26 | — | — |
-| Rebuild (with format) | ✓ 2026-11-26 | — | ◐ 2026-11-26 (disk rebuilt right; the read-back stalled at track 2) |
-| Erase | ✓ 2026-11-26 (whole disk, 29 s; native 1541 ROM) | — | ✓ 2026-11-25 (write protect honoured) |
-| Format (Disk → Format) | ✓ 2026-11-26 (`cbmforng`, 18 s, after Erase) | — | ✓ 2026-11-25 |
-| Cancel during a disk check | ✓ 2026-11-26 | — | — |
-| Cancel during an image read | — | ✓ 2026-11-25 (a 1571; unit not recorded) | |
-| UI walk-through, Sort and FB-ify dialogs | ✓ 2026-11-26 (Antti) | — | — |
+| Operation | 1541 | 1571a | 1571b | VIC-1541 |
+|---|---|---|---|---|
+| Detect | ✓ 2026-11-26 | ✓ | ✓ | ✓ 2026-11-26 |
+| Directory read | ✓ 2026-11-26 | ✓ 2026-11-25 | ✓ 2026-11-25 | — |
+| 74 head recovery (bump, seek 18, `I`) | ◐ 2026-11-26 (ran with no disk in: knocked, 21) | — | ✓ 2026-11-25 | — |
+| Disk check (tracks 18 + 36) | ✓ 2026-11-26 | — | ◐ 2026-11-25 (intermittent 30 s hang) | ◐ 2026-11-26 (track 36 hung 30 s once, alone on the bus) |
+| Read disk to image (35 tracks) | ◐ 2026-11-26 (one misread, 13/5) | ✓ 2026-11-25 | ◐ 2026-11-26 (2 of 5 reads stalled early, at tracks 5 and 2) | ✓ 2026-11-26 (83 s, identical) |
+| Write image, no format | ✓ 2026-11-26 | ✓ 2026-11-25 | ✓ 2026-11-26 (189 s) | ◐ 2026-11-26 (102 s clean; later one slowed to ~6× and was stopped) |
+| Write image with pre-format | — | — | ✓ 2026-11-26 (format 17 s) | — |
+| Read files (`cbmread`, PRG/SEQ/USR) | ✓ 2026-11-26 | — | ✓ 2026-11-25 | — |
+| Write files (`cbmwrite`) | ✗ 2026-11-26 after a scratch without reset (74) | ✗ 2026-11-25 after `d64copy` without reset (74) | ✓ 2026-11-25 | — |
+| Scratch, full disk (`S:*`) | ✓ 2026-11-26 (count right, 189 s) | — | ◐ 2026-11-26 (count unreliable) | — |
+| Rename / Copy (drive's R and C) | ◐ 2026-11-26 (next writes 71 until a reset, as on the 1571) | — | ◐ 2026-11-26 (next writes 71 until a reset) | — |
+| Make first | ✓ 2026-11-26 (11.4 s, `LOAD"*"` checked) | — | ✓ 2026-11-26 (shared engine, 12 s) | ✓ 2026-11-26 (13 s) |
+| Sort (directory only) | ✓ 2026-11-26 | — | ✓ 2026-11-26 (12 s) | ✓ 2026-11-26 (13.4 s) |
+| Restore a directory backup | ✓ 2026-11-26 | — | ✓ 2026-11-26 (8.1 s) | — |
+| FB-ify (incl. replacing an FB) | ✓ 2026-11-26 | — | ✓ 2026-11-26 after a fix (replace got 74: head left on track 36) | ✓ 2026-11-26 (`LOAD"*"` checked) |
+| Sort + FB + full image | ✓ 2026-11-26 | — | — | — |
+| Rebuild (with format) | ✓ 2026-11-26 | — | ◐ 2026-11-26 (disk rebuilt right; the read-back stalled at track 2) | ✗ 2026-11-26 (write after the format: header not found on track 1, head banging) |
+| Erase | ✓ 2026-11-26 (whole disk, 29 s; native 1541 ROM) | — | ✓ 2026-11-25 (write protect honoured) | — |
+| Format (Disk → Format) | ✓ 2026-11-26 (`cbmforng`, 18 s, after Erase) | — | ✓ 2026-11-25 | — |
+| Cancel during a disk check | ✓ 2026-11-26 | — | — | — |
+| Cancel during an image read | — | ✓ 2026-11-25 (a 1571; unit not recorded) | | — |
+| UI walk-through, Sort and FB-ify dialogs | ✓ 2026-11-26 (Antti) | — | — | — |
 
 ## Details
 
@@ -98,3 +98,11 @@ timings below the table; tool quirks live in `opencbm-tools.md`, drive incidents
   count; after a reset writes worked (opencbm-tools.md). Erase of tracks 1–40: 29 s; afterwards track 18 was
   unreadable and the directory answered 74, as for a never-formatted disk; `cbmforng` then formatted it in 18 s
   (DISKNAME, 01, 664 blocks free).
+- **2026-11-26, VIC-1541 alone on the bus (21:40–22:08):** ROM: see Drives. Write image 102 s and read 83 s,
+  byte-identical; Make first 13 s, Sort 13.4 s, FB-ify 73 s (30 s of it a track-36 hang in the disk check, so
+  that hang isn't a two-device effect), `LOAD"*"` gave `fb64`. Rebuild: read and `cbmforng` (14.9 s) fine, then
+  the image write found no header on track 1 (write errors code 2 on every sector, constant head banging) and was
+  stopped after 7 min; minutes later the disk read cleanly (tracks 1, 10, 18, 30 in full, 664 blocks free). A
+  plain write after that crawled (622/683 blocks in 10 min, ~6× slower than at 21:42); Claude stopped it, taking
+  it for a hang (it was progressing). The drive got worse the longer it worked: suspect heat or a dirty head,
+  unproven. Next: cool down, maybe clean the head, then a read-only full read.
